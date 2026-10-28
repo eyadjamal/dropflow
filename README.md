@@ -1,7 +1,6 @@
 # DropFlow
 
 ### Drop it. Convert it. Done.
-![DropFlow](dropflow.png)
 
 DropFlow is a local, drag-and-drop Windows file toolbox for PDFs, Office
 files, images, archives, video, and audio. Drop files onto the window, pick a
