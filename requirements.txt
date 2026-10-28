@@ -1,0 +1,16 @@
+﻿pystray
+tkinterdnd2
+Pillow<10.1
+PyMuPDF
+python-docx
+reportlab
+python-pptx
+openpyxl
+pytesseract
+arabic-reshaper
+python-bidi
+imageio-ffmpeg
+# Optional: Office COM fallback on Windows
+# pywin32
+# Optional: RAR extraction support
+# rarfile
