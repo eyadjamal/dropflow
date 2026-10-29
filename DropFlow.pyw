@@ -39,7 +39,9 @@ Included tools: PDF merge/compress/split/page ranges/export/OCR, searchable
 PDFs, image and GIF conversion, Word/PowerPoint/Excel/text conversion, ZIP/RAR
 extraction with password prompts, video compression with
 resolution/target-size/GPU options, and audio extraction.  The floating window
-can be dragged anywhere on screen with the mouse.
+can be dragged anywhere on screen, remembers its position, supports English
+and Arabic, checks GitHub for updates, and can be added to the Windows Explorer
+right-click menu.
 
 Debugging: run "python DropFlow.pyw --console" to keep a console attached.
 """
@@ -56,11 +58,13 @@ import os
 import queue
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import winreg
 import zipfile
 from collections import Counter
 from dataclasses import dataclass, field
@@ -154,18 +158,50 @@ _check_hard_dependencies()
 _MUTEX = None
 
 
-def _ensure_single_instance() -> None:
+def _cli_paths() -> list[str]:
+    args = sys.argv[1:]
+    if "--send" not in args:
+        return []
+    index = args.index("--send")
+    values = [arg for arg in args[index + 1:] if not arg.startswith("--")]
+    return [str(Path(value).resolve()) for value in values if Path(value).exists()]
+
+
+def _send_to_existing(paths: list[str]) -> bool:
+    payload = json.dumps({"paths": paths, "action": "show"}).encode("utf-8")
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        try:
+            data = json.loads(INSTANCE_PATH.read_text(encoding="utf-8"))
+            port = int(data["port"])
+            with socket.create_connection(("127.0.0.1", port), timeout=0.4) as sock:
+                sock.sendall(payload + b"\n")
+                sock.settimeout(0.8)
+                reply = sock.recv(32)
+                if reply:
+                    return True
+        except Exception:
+            time.sleep(0.1)
+    return False
+
+
+def _ensure_single_instance(paths: list[str] | None = None) -> None:
     global _MUTEX
     try:
         _kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
         _kernel32.CreateMutexW.restype = wintypes.HANDLE
         _MUTEX = _kernel32.CreateMutexW(None, False, "Local\\DropFlow_SingleInstance")
         if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            if _send_to_existing(list(paths or [])):
+                sys.exit(0)
             _msgbox("DropFlow is already running.\n\nLook for its icon in the system tray "
                     "or press your shortcut.", flags=0x40)
             sys.exit(0)
+    except SystemExit:
+        raise
     except Exception:
         pass
+
 
 
 def _relaunch_without_console() -> None:
@@ -225,11 +261,35 @@ except Exception as _office_exc:
     office = None  # type: ignore[assignment]
     _OFFICE_IMPORT_ERROR = str(_office_exc)
 
+try:
+    from i18n import LANGUAGES, get_language, is_rtl, set_language, tr  # noqa: E402
+except Exception:  # localization is optional but bundled normally
+    LANGUAGES = {"en": "English"}
+    def set_language(_code):  # type: ignore
+        pass
+    def get_language():  # type: ignore
+        return "en"
+    def is_rtl():  # type: ignore
+        return False
+    def tr(text):  # type: ignore
+        return text
+
+try:
+    import app_update  # noqa: E402
+except Exception:
+    app_update = None  # type: ignore[assignment]
+
+try:
+    import appearance  # noqa: E402
+except Exception:  # optional module; bundled normally
+    appearance = None  # type: ignore[assignment]
+
 
 # --------------------------------------------------------------------------- #
 #  Constants, theme, config, logging
 # --------------------------------------------------------------------------- #
 APP_NAME = "DropFlow"
+APP_VERSION = "3.2.0"
 SUFFIX = "_dropflow"
 DEFAULT_HOTKEY = "ctrl+shift+d"
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif"}
@@ -251,6 +311,54 @@ SUBTLE = "#7f849c"
 GREEN = "#a6e3a1"
 RED = "#f38ba8"
 FONT = "Segoe UI"
+THEME_NAME = "midnight"
+THEME_SETTING = "midnight"
+ACCENT_CUSTOM = ""
+REDUCED_MOTION = False
+THEME_TOKENS = {}
+
+
+def apply_appearance(setting: str = "midnight", accent: str = "",
+                     reduce_motion: bool = False) -> str:
+    """Apply local theme tokens and return the actual theme name."""
+    global BG, FG, ACCENT, ACCENT_HI, SURFACE, HOVER, SUBTLE, GREEN, RED
+    global THEME_NAME, THEME_SETTING, ACCENT_CUSTOM, REDUCED_MOTION, THEME_TOKENS
+    setting = setting if setting in ("system", "midnight", "slate", "ocean",
+                                     "forest", "rose", "sepia", "light",
+                                     "high_contrast") else "midnight"
+    actual, tokens = (appearance.resolve_theme(setting, accent)
+                      if appearance is not None else
+                      (setting if setting != "system" else "midnight",
+                       {"bg": BG, "fg": FG, "accent": ACCENT, "accent_hi": ACCENT_HI,
+                        "surface": SURFACE, "hover": HOVER, "subtle": SUBTLE,
+                        "green": GREEN, "red": RED}))
+    THEME_SETTING = setting
+    THEME_NAME = actual
+    THEME_TOKENS = tokens
+    ACCENT_CUSTOM = appearance.normalize_hex(accent, "") if appearance and accent else ""
+    REDUCED_MOTION = bool(reduce_motion)
+    BG = tokens["bg"]
+    FG = tokens["fg"]
+    ACCENT = tokens["accent"]
+    ACCENT_HI = tokens["accent_hi"]
+    SURFACE = tokens["surface"]
+    HOVER = tokens["hover"]
+    SUBTLE = tokens["subtle"]
+    GREEN = tokens["green"]
+    RED = tokens["red"]
+    return actual
+
+
+def appearance_names() -> list[str]:
+    if appearance is not None:
+        return appearance.THEME_ORDER
+    return ["midnight", "light", "high_contrast"]
+
+
+def appearance_label(name: str) -> str:
+    if appearance is not None:
+        return appearance.THEME_LABELS.get(name, name.title())
+    return name.title()
 
 SCALE = 1.0
 
@@ -262,6 +370,7 @@ def px(n: float) -> int:
 
 DATA_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / APP_NAME
 CONFIG_PATH = DATA_DIR / "config.json"
+INSTANCE_PATH = DATA_DIR / "instance.json"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 log = logging.getLogger(APP_NAME)
@@ -297,7 +406,11 @@ def _setup_logging() -> None:
 
 
 def load_config() -> dict:
-    cfg = {"hotkey": DEFAULT_HOTKEY, "autostart": False, "ocr_langs": "ara+eng"}
+    cfg = {"hotkey": DEFAULT_HOTKEY, "autostart": False, "ocr_langs": "ara+eng",
+           "language": "en", "remember_position": True, "window_x": None,
+           "window_y": None, "check_updates": True, "last_update_check": 0,
+           "explorer_menu": False, "theme": "midnight", "accent": "",
+           "reduce_motion": False, "favorite_actions": []}
     try:
         data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         if isinstance(data, dict):
@@ -308,6 +421,30 @@ def load_config() -> dict:
             langs = data.get("ocr_langs")
             if isinstance(langs, str) and langs.strip():
                 cfg["ocr_langs"] = langs.strip()
+            language = data.get("language")
+            if language in ("en", "ar"):
+                cfg["language"] = language
+            cfg["remember_position"] = bool(data.get("remember_position", True))
+            for key in ("window_x", "window_y"):
+                value = data.get(key)
+                if isinstance(value, int):
+                    cfg[key] = value
+            cfg["check_updates"] = bool(data.get("check_updates", True))
+            try:
+                cfg["last_update_check"] = float(data.get("last_update_check", 0))
+            except (TypeError, ValueError):
+                cfg["last_update_check"] = 0
+            cfg["explorer_menu"] = bool(data.get("explorer_menu", False))
+            theme = data.get("theme")
+            if theme in appearance_names():
+                cfg["theme"] = theme
+            accent = data.get("accent")
+            if isinstance(accent, str) and accent.strip():
+                cfg["accent"] = accent.strip()
+            cfg["reduce_motion"] = bool(data.get("reduce_motion", False))
+            favorites = data.get("favorite_actions")
+            if isinstance(favorites, list):
+                cfg["favorite_actions"] = [str(x) for x in favorites if isinstance(x, str)]
     except Exception:
         pass
     return cfg
@@ -389,6 +526,43 @@ def set_autostart(enabled: bool) -> None:
                 pass
 
 
+def explorer_command() -> str:
+    return launch_command() + ' --send "%1"'
+
+
+def set_explorer_menu(enabled: bool) -> None:
+    """Add/remove 'Send to DropFlow' for files and folders."""
+    roots = (
+        r"Software\Classes\*\shell\DropFlow",
+        r"Software\Classes\Directory\shell\DropFlow",
+    )
+    for root in roots:
+        try:
+            if not enabled:
+                try:
+                    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, root + r"\command")
+                except FileNotFoundError:
+                    pass
+                try:
+                    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, root)
+                except FileNotFoundError:
+                    pass
+                continue
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, root, 0,
+                                    winreg.KEY_SET_VALUE) as key:
+                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "Send to DropFlow")
+                winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ,
+                                  f'"{sys.executable}",0')
+                winreg.SetValueEx(key, "MultiSelectModel", 0, winreg.REG_SZ, "Player")
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, root + r"\command", 0,
+                                    winreg.KEY_SET_VALUE) as key:
+                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, explorer_command())
+        except Exception:
+            log.exception("Could not update Explorer menu key %s", root)
+            raise
+
+
+
 # --------------------------------------------------------------------------- #
 #  Win32 window helpers
 # --------------------------------------------------------------------------- #
@@ -446,6 +620,30 @@ def dark_titlebar(win: tk.Misc) -> None:
             if dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val),
                                          ctypes.sizeof(val)) == 0:
                 break
+    except Exception:
+        pass
+
+
+def round_window(win: tk.Misc) -> None:
+    """Windows 11 rounded corners plus a native shadow request."""
+    try:
+        win.update_idletasks()
+        hwnd = _user32.GetAncestor(win.winfo_id(), 2) or win.winfo_id()
+        dwm = ctypes.windll.dwmapi
+        dwm.DwmSetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD,
+                                              ctypes.c_void_p, wintypes.DWORD]
+        corner = ctypes.c_int(2)  # DWMWCP_ROUND
+        dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(corner),
+                                  ctypes.sizeof(corner))
+        shadow = ctypes.c_int(2)  # DWMNCRP_ENABLED
+        dwm.DwmSetWindowAttribute(hwnd, 2, ctypes.byref(shadow),
+                                  ctypes.sizeof(shadow))
+        color = ((int(ACCENT[5:7], 16) << 16)
+                 | (int(ACCENT[3:5], 16) << 8)
+                 | int(ACCENT[1:3], 16))
+        border = ctypes.c_int(color)
+        dwm.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(border),
+                                  ctypes.sizeof(border))
     except Exception:
         pass
 
@@ -673,6 +871,13 @@ def open_path(path: Path) -> None:
         os.startfile(str(path))
     except Exception:
         log.exception("Could not open %s", path)
+
+
+def open_url(url: str) -> None:
+    try:
+        os.startfile(str(url))
+    except Exception:
+        log.exception("Could not open URL %s", url)
 
 
 def _tail(text: str, limit: int = 600) -> str:
@@ -4314,6 +4519,12 @@ class DropWindow:
         self._drag_origin: tuple[int, int] | None = None
         self._drag_window: tuple[int, int] | None = None
         self._drag_moved = False
+        self.progress_bar = None
+        self.batch_label: tk.Label | None = None
+        self.activity_box: tk.Text | None = None
+        self.elapsed_label: tk.Label | None = None
+        self._work_timer = None
+        self._work_started = 0.0
 
         t = self.top = tk.Toplevel(app.root)
         t.withdraw()
@@ -4330,6 +4541,7 @@ class DropWindow:
         t.bind("<ButtonRelease-1>", self._end_drag, add="+")
         self._bind_dnd(t)
         self._bind_dnd(self.body)
+        round_window(t)
         self.show_drop_zone()
         t.deiconify()
         self._fit()
@@ -4339,6 +4551,14 @@ class DropWindow:
     # ----- plumbing ------------------------------------------------------- #
     def _fade(self, current, target, step, then=None):
         if not self.alive:
+            return
+        if REDUCED_MOTION:
+            try:
+                self.top.attributes("-alpha", target)
+            except tk.TclError:
+                pass
+            if then:
+                then()
             return
         nxt = min(current + step, target) if target > current else max(current - step, target)
         try:
@@ -4367,7 +4587,8 @@ class DropWindow:
         try:
             cls = widget.winfo_class()
             if cls in {"Entry", "TEntry", "TCombobox", "Scale", "Checkbutton",
-                       "Button", "TButton", "Text", "Spinbox", "TSpinbox"}:
+                       "Button", "TButton", "Text", "Spinbox", "TSpinbox",
+                       "Scrollbar", "TScrollbar"}:
                 return True
             if str(widget.cget("cursor")) == "hand2":
                 return True
@@ -4409,6 +4630,17 @@ class DropWindow:
         self._drag_origin = None
         self._drag_window = None
 
+    def _remember_position(self) -> None:
+        try:
+            width = self.top.winfo_width()
+            height = self.top.winfo_height()
+            x = self.top.winfo_x()
+            y = self.top.winfo_y()
+            if width > 1 and height > 1:
+                self.app.save_window_position(x + width // 2, y + height // 2)
+        except Exception:
+            pass
+
     def _refocus(self):
         if not self.alive:
             return
@@ -4439,6 +4671,16 @@ class DropWindow:
 
     def _clear(self):
         self._cancel_timer()
+        self._cancel_work_timer()
+        if self.progress_bar is not None:
+            try:
+                self.progress_bar.stop()
+            except tk.TclError:
+                pass
+        self.progress_bar = None
+        self.batch_label = None
+        self.activity_box = None
+        self.elapsed_label = None
         self._close_password_dialog()
         try:
             self.top.unbind("<Return>")
@@ -4481,6 +4723,24 @@ class DropWindow:
                 pass
             self._timer = None
 
+    def _cancel_work_timer(self):
+        if self._work_timer is not None:
+            try:
+                self.top.after_cancel(self._work_timer)
+            except Exception:
+                pass
+            self._work_timer = None
+
+    def _tick_elapsed(self):
+        if not self.alive or self.elapsed_label is None:
+            return
+        elapsed = max(0, int(time.monotonic() - self._work_started))
+        try:
+            self.elapsed_label.config(text=f"{elapsed // 60}:{elapsed % 60:02d}")
+            self._work_timer = self.top.after(500, self._tick_elapsed)
+        except tk.TclError:
+            self._work_timer = None
+
     def _arm_idle(self, ms: int = 30000):
         self._cancel_timer()
         if self.state == "zone" and self.alive:
@@ -4518,6 +4778,7 @@ class DropWindow:
     def _destroy(self):
         if not self.alive:
             return
+        self._remember_position()
         self.alive = False
         self._close_password_dialog()
         if self._job is not None:
@@ -4531,6 +4792,7 @@ class DropWindow:
 
     def shutdown(self):
         """Called when the whole app quits; kills any running helper process."""
+        self._remember_position()
         self._close_password_dialog()
         if self._job is not None:
             self._job.cancel()
@@ -4544,9 +4806,9 @@ class DropWindow:
     def _button(self, parent, text, command, primary=False, center=False):
         bg, fg = (ACCENT, BG) if primary else (SURFACE, FG)
         hbg, hfg = (ACCENT_HI, BG) if primary else (HOVER, ACCENT)
-        b = tk.Label(parent, text=text, bg=bg, fg=fg, cursor="hand2",
+        b = tk.Label(parent, text=tr(text), bg=bg, fg=fg, cursor="hand2",
                      font=(FONT, 10, "bold" if primary else "normal"),
-                     anchor="center" if center else "w", padx=px(12), pady=px(7))
+                     anchor="center" if center else ("e" if is_rtl() else "w"), padx=px(12), pady=px(7))
 
         def paint(b_bg, b_fg):
             try:
@@ -4574,6 +4836,10 @@ class DropWindow:
         c = tk.Canvas(self.body, width=W, height=H, bg=BG, highlightthickness=0)
         c.pack(padx=px(10), pady=(px(10), px(4)))
         self.zone = c
+        self._hover_job = None
+        self._ripple_jobs = []
+        self.glow = c.create_oval(px(0), px(0), W, H, outline=ACCENT_HI,
+                                  width=1, state="hidden")
         self.rect = c.create_rectangle(px(4), px(4), W - px(4), H - px(4),
                                        outline=ACCENT, dash=(6, 4), width=2)
         mid = W // 2
@@ -4581,11 +4847,14 @@ class DropWindow:
                       arrowshape=(px(14), px(16), px(7)))
         c.create_line(mid - px(28), px(66), mid - px(28), px(90), mid + px(28), px(90),
                       mid + px(28), px(66), width=3, fill=ACCENT, joinstyle=tk.ROUND)
-        c.create_text(mid, px(118), text="Drop files or folders here", fill=FG,
+        c.create_text(mid, px(118), text=tr("Drop files or folders here"), fill=FG,
                       font=(FONT, 11, "bold"))
-        c.create_text(mid, px(142), text="PDF  \u00b7  images  \u00b7  Word  \u00b7  video  \u00b7  ZIP",
+        c.create_text(mid, px(142), text=tr("PDF · images · Word · video · ZIP"),
                       fill=SUBTLE, font=(FONT, 9))
-        tk.Label(self.body, text=f"{pretty_hotkey(self.app.cfg['hotkey'])} toggles  \u00b7  Esc closes",
+        hint = (f"{pretty_hotkey(self.app.cfg['hotkey'])} "
+                + ("للفتح · Esc للإغلاق" if get_language() == "ar"
+                   else "toggles  ·  Esc closes"))
+        tk.Label(self.body, text=hint,
                  fg=SUBTLE, bg=BG, font=(FONT, 8)).pack(pady=(0, px(8)))
         self._x_button(self.body).place(relx=1.0, x=-px(8), y=px(6), anchor="ne")
         self._bind_dnd_tree()
@@ -4594,10 +4863,72 @@ class DropWindow:
 
     def _hover(self, on: bool):
         try:
-            self.zone.itemconfig(self.rect, outline=ACCENT_HI if on else ACCENT,
-                                 width=3 if on else 2)
-            self.zone.configure(bg=HOVER if on else BG)
+            if self._hover_job is not None:
+                self.zone.after_cancel(self._hover_job)
+                self._hover_job = None
+        except Exception:
+            pass
+        if REDUCED_MOTION:
+            self._paint_hover(on, 1.0)
+            return
+        steps = 4
+        for i in range(1, steps + 1):
+            self._hover_job = self.zone.after(
+                i * 20, lambda t=i / steps: self._paint_hover(on, t))
+
+    def _paint_hover(self, on: bool, t: float):
+        try:
+            self.zone.itemconfig(
+                self.rect,
+                outline=ACCENT_HI if (on and t > 0.5) else ACCENT,
+                width=3 if on and t > 0.5 else 2)
+            self.zone.configure(bg=HOVER if on and t > 0.5 else BG)
+            self.zone.itemconfig(self.glow, state="normal" if on else "hidden",
+                                 width=max(1, int(2 + 4 * t)))
         except (tk.TclError, AttributeError):
+            pass
+
+    def _drop_ripple(self):
+        if REDUCED_MOTION:
+            return
+        try:
+            w = self.zone.winfo_width()
+            h = self.zone.winfo_height()
+        except Exception:
+            return
+        for delay in (0, 70, 140):
+            def start(_delay=delay):
+                if not self.alive:
+                    return
+                try:
+                    oval = self.zone.create_oval(
+                        w * 0.30, h * 0.30, w * 0.70, h * 0.70,
+                        outline=ACCENT_HI, width=2)
+                except tk.TclError:
+                    return
+                self._ripple_jobs.append(oval)
+                self._ripple_step(oval, 0)
+            self.zone.after(delay, start)
+
+    def _ripple_step(self, oval, step: int):
+        if not self.alive or step > 9:
+            try:
+                self.zone.delete(oval)
+            except tk.TclError:
+                pass
+            return
+        try:
+            w = self.zone.winfo_width()
+            h = self.zone.winfo_height()
+            grow = 1.0 + step * 0.22
+            self.zone.coords(
+                oval,
+                w * 0.30 - (grow - 1.0) * w * 0.12,
+                h * 0.30 - (grow - 1.0) * h * 0.12,
+                w * 0.70 + (grow - 1.0) * w * 0.12,
+                h * 0.70 + (grow - 1.0) * h * 0.12)
+            self.zone.after(24, lambda: self._ripple_step(oval, step + 1))
+        except tk.TclError:
             pass
 
     def _on_enter(self, event):
@@ -4619,6 +4950,7 @@ class DropWindow:
         if not paths:
             self._hover(False)
             return event.action
+        self._drop_ripple()
         self.top.after(10, lambda: self._apply_drop(paths))
         return event.action
 
@@ -4647,25 +4979,144 @@ class DropWindow:
         summary, self.actions = build_actions(paths)
         self._clear()
         self.state = "menu"
+        rtl = is_rtl()
         pad = px(14)
         head = tk.Frame(self.body, bg=BG)
         head.pack(fill="x", padx=pad, pady=(px(12), 0))
         tk.Label(head, text=summary, fg=FG, bg=BG, font=(FONT, 11, "bold"),
-                 anchor="w").pack(side="left")
-        self._x_button(head).pack(side="right")
-        names = ", ".join(p.name for p in paths[:3])
-        if len(paths) > 3:
-            names += f"  +{len(paths) - 3} more"
-        tk.Label(self.body, text=names, fg=SUBTLE, bg=BG, font=(FONT, 9), anchor="w",
-                 justify="left", wraplength=px(300)).pack(fill="x", padx=pad, pady=(0, px(8)))
-        for a in self.actions:
-            self._button(self.body, a.label, lambda a=a: self.choose(a)).pack(
-                fill="x", padx=pad, pady=px(2))
-        tk.Label(self.body, text="Drop more files to add them  \u00b7  Esc closes",
+                 anchor="e" if rtl else "w",
+                 justify="right" if rtl else "left").pack(
+            side="right" if rtl else "left")
+        self._x_button(head).pack(side="left" if rtl else "right")
+
+        self._thumb_refs = []
+        strip = tk.Frame(self.body, bg=BG)
+        strip.pack(fill="x", padx=pad, pady=(px(6), px(2)))
+        for p in paths[:4]:
+            chip = tk.Frame(strip, bg=SURFACE)
+            chip.pack(side="right" if rtl else "left", padx=(px(5) if rtl else 0, 0 if rtl else px(5)))
+            thumb = self._thumbnail(p)
+            if thumb is not None:
+                self._thumb_refs.append(thumb)
+                tk.Label(chip, image=thumb, bg=SURFACE, bd=0).pack(
+                    side="right" if rtl else "left", padx=px(2), pady=px(2))
+            else:
+                glyph, color = self._file_glyph(p)
+                tk.Label(chip, text=glyph, fg=color, bg=SURFACE,
+                         font=(FONT, 9, "bold"), width=4).pack(
+                    side="right" if rtl else "left", padx=px(3), pady=px(2))
+            tk.Label(chip, text=p.name[:18], fg=SUBTLE, bg=SURFACE,
+                     font=(FONT, 7)).pack(side="right" if rtl else "left", padx=(px(4) if rtl else 0, 0 if rtl else px(4)))
+        if len(paths) > 4:
+            tk.Label(strip, text=f"+{len(paths) - 4}", fg=SUBTLE, bg=BG,
+                     font=(FONT, 8, "bold")).pack(side="right" if rtl else "left", padx=px(2))
+
+        self._search_var = tk.StringVar()
+        search_row = tk.Frame(self.body, bg=SURFACE)
+        search_row.pack(fill="x", padx=pad, pady=(px(6), px(4)))
+        tk.Label(search_row, text="\u2315", fg=SUBTLE, bg=SURFACE,
+                 font=(FONT, 10)).pack(side="right" if rtl else "left", padx=(px(2), px(7)) if rtl else (px(7), px(2)))
+        self._search_entry = tk.Entry(
+            search_row, textvariable=self._search_var, bg=SURFACE, fg=FG,
+            insertbackground=FG, relief="flat", font=(FONT, 9),
+            highlightthickness=0, bd=0)
+        self._search_entry.configure(justify="right" if rtl else "left")
+        self._search_entry.pack(side="right" if rtl else "left", fill="x", expand=True,
+                                ipady=px(4), pady=px(2))
+        self._search_var.trace_add(
+            "write", lambda *a: self._render_actions())
+        self._actions_frame = tk.Frame(self.body, bg=BG)
+        self._actions_frame.pack(fill="x", padx=pad)
+        self._render_actions()
+        tk.Label(self.body, text=tr("Drop more files to add them  ·  Esc closes"),
                  fg=SUBTLE, bg=BG, font=(FONT, 8)).pack(pady=(px(6), px(10)))
         self._bind_dnd_tree()
         self._fit()
         self.top.focus_force()
+
+    @staticmethod
+    def _file_glyph(path: Path) -> tuple[str, str]:
+        ext = path.suffix.lower()
+        if ext == ".pdf":
+            return "PDF", RED
+        if ext in VIDEO_EXTS:
+            return "\u25b6", ACCENT
+        if ext in IMG_EXTS:
+            return "\u25a7", GREEN
+        if ext in ARCHIVE_EXTS:
+            return "ZIP", "#e0af68"
+        if ext in {".docx", ".doc", ".txt"}:
+            return "W", "#74a7ff"
+        if ext in {".xlsx", ".xls", ".csv"}:
+            return "X", GREEN
+        if ext in {".pptx", ".ppt"}:
+            return "P", "#f38ba8"
+        return "\u25a1", SUBTLE
+
+    def _thumbnail(self, path: Path):
+        try:
+            from PIL import ImageTk
+            ext = path.suffix.lower()
+            if ext in IMG_EXTS:
+                im = Image.open(path)
+                try:
+                    im.thumbnail((44, 44))
+                    return ImageTk.PhotoImage(im.copy())
+                finally:
+                    im.close()
+            if ext == ".pdf" and path.stat().st_size < 80 * 1024 * 1024:
+                doc = fitz.open(path)
+                try:
+                    if len(doc):
+                        pix = doc[0].get_pixmap(matrix=fitz.Matrix(0.12, 0.12))
+                        im = Image.frombytes("RGB", (pix.width, pix.height),
+                                            pix.samples)
+                        im.thumbnail((44, 44))
+                        return ImageTk.PhotoImage(im)
+                finally:
+                    doc.close()
+        except Exception:
+            pass
+        return None
+
+    def _render_actions(self):
+        frame = getattr(self, "_actions_frame", None)
+        if frame is None:
+            return
+        for child in frame.winfo_children():
+            child.destroy()
+        query = getattr(self, "_search_var", tk.StringVar()).get().strip().lower()
+        favorites = set(self.app.cfg.get("favorite_actions", []))
+        visible = [a for a in self.actions if query in tr(a.label).lower()]
+        visible.sort(key=lambda a: (a.label not in favorites,))
+        for a in visible:
+            row = tk.Frame(frame, bg=BG)
+            row.pack(fill="x", pady=px(1))
+            fav = a.label in favorites
+            star = tk.Label(row, text="\u2605" if fav else "\u2606",
+                            fg=ACCENT if fav else SUBTLE, bg=BG,
+                            cursor="hand2", font=(FONT, 10), width=2)
+            star.pack(side="right" if is_rtl() else "left")
+            star.bind("<Button-1>", lambda e, a=a: self._toggle_favorite(a))
+            self._button(row, a.label, lambda a=a: self.choose(a)).pack(
+                side="left", fill="x", expand=True)
+        if not visible:
+            tk.Label(frame, text=tr("No matching actions"), fg=SUBTLE, bg=BG,
+                     font=(FONT, 9)).pack(pady=px(8))
+        try:
+            self._fit()
+        except Exception:
+            pass
+
+    def _toggle_favorite(self, action: Action):
+        favorites = list(self.app.cfg.get("favorite_actions", []))
+        if action.label in favorites:
+            favorites.remove(action.label)
+        else:
+            favorites.append(action.label)
+        self.app.cfg["favorite_actions"] = favorites
+        save_config(self.app.cfg)
+        self._render_actions()
 
     def choose(self, action: Action):
         if action.office_options:
@@ -4699,16 +5150,16 @@ class DropWindow:
         self._clear()
         self.state = "params"
         pad = px(16)
-        tk.Label(self.body, text=action.label, fg=FG, bg=BG, font=(FONT, 11, "bold"),
+        tk.Label(self.body, text=tr(action.label), fg=FG, bg=BG, font=(FONT, 11, "bold"),
                  anchor="w").pack(fill="x", padx=pad, pady=(px(14), px(2)))
-        tk.Label(self.body, text=caption, fg=SUBTLE, bg=BG, font=(FONT, 9),
+        tk.Label(self.body, text=tr(caption), fg=SUBTLE, bg=BG, font=(FONT, 9),
                  anchor="w").pack(fill="x", padx=pad)
         var = tk.StringVar(value=str(default))
         entry = tk.Entry(self.body, textvariable=var, bg=SURFACE, fg=FG,
                          insertbackground=FG, relief="flat", font=(FONT, 12),
                          highlightthickness=0, bd=0)
         entry.pack(fill="x", padx=pad, pady=(px(8), px(2)), ipady=px(6))
-        tk.Label(self.body, text=hint, fg=SUBTLE, bg=BG, font=(FONT, 8),
+        tk.Label(self.body, text=tr(hint), fg=SUBTLE, bg=BG, font=(FONT, 8),
                  anchor="w", justify="left", wraplength=px(300)).pack(
             fill="x", padx=pad, pady=(0, px(4)))
         self._params_buttons(lambda: self.start(action, {key: var.get()}))
@@ -4731,12 +5182,12 @@ class DropWindow:
         else:
             formats = ["pdf", "txt"]
         label_map = getattr(office, "TARGET_LABELS", {}) if office else {}
-        labels = {label_map.get(fmt, fmt.upper()): fmt for fmt in formats}
+        labels = {tr(label_map.get(fmt, fmt.upper())): fmt for fmt in formats}
         values = list(labels)
-        tk.Label(self.body, text=action.label, fg=FG, bg=BG,
+        tk.Label(self.body, text=tr(action.label), fg=FG, bg=BG,
                  font=(FONT, 11, "bold"), anchor="w").pack(
             fill="x", padx=pad, pady=(px(14), px(2)))
-        tk.Label(self.body, text="Output format", fg=SUBTLE, bg=BG,
+        tk.Label(self.body, text=tr("Output format"), fg=SUBTLE, bg=BG,
                  font=(FONT, 9), anchor="w").pack(fill="x", padx=pad)
         default = "pdf" if "pdf" in formats else (formats[0] if formats else "")
         if default != "pdf" and "xlsx" in formats and docs and all(
@@ -4781,13 +5232,13 @@ class DropWindow:
         labels = {}
         label_map = getattr(media, "FORMAT_LABELS", {}) if media else {}
         for fmt in formats:
-            label = label_map.get(fmt, fmt.upper())
+            label = tr(label_map.get(fmt, fmt.upper()))
             labels[label] = fmt
         values = list(labels)
-        tk.Label(self.body, text=action.label, fg=FG, bg=BG,
+        tk.Label(self.body, text=tr(action.label), fg=FG, bg=BG,
                  font=(FONT, 11, "bold"), anchor="w").pack(
             fill="x", padx=pad, pady=(px(14), px(2)))
-        tk.Label(self.body, text="Output format", fg=SUBTLE, bg=BG,
+        tk.Label(self.body, text=tr("Output format"), fg=SUBTLE, bg=BG,
                  font=(FONT, 9), anchor="w").pack(fill="x", padx=pad)
         var = tk.StringVar(value=values[0] if values else "")
         combo = ttk.Combobox(self.body, textvariable=var, state="readonly",
@@ -4817,9 +5268,9 @@ class DropWindow:
         self._clear()
         self.state = "params"
         pad = px(16)
-        tk.Label(self.body, text=action.label, fg=FG, bg=BG, font=(FONT, 11, "bold"),
+        tk.Label(self.body, text=tr(action.label), fg=FG, bg=BG, font=(FONT, 11, "bold"),
                  anchor="w").pack(fill="x", padx=pad, pady=(px(14), px(2)))
-        tk.Label(self.body, text="Quality (CRF, lower = better and larger)",
+        tk.Label(self.body, text=tr("Quality (CRF, lower = better and larger)"),
                  fg=SUBTLE, bg=BG, font=(FONT, 9), anchor="w").pack(fill="x", padx=pad)
         crf_var = tk.IntVar(value=23)
         crf_label = tk.Label(self.body, text="23", fg=ACCENT, bg=BG,
@@ -4833,7 +5284,7 @@ class DropWindow:
 
         row = tk.Frame(self.body, bg=BG)
         row.pack(fill="x", padx=pad, pady=(px(2), 0))
-        tk.Label(row, text="Resolution", fg=SUBTLE, bg=BG,
+        tk.Label(row, text=tr("Resolution"), fg=SUBTLE, bg=BG,
                  font=(FONT, 9)).pack(side="left")
         res_var = tk.StringVar(value="Keep original")
         res_box = ttk.Combobox(row, textvariable=res_var, state="readonly",
@@ -4844,7 +5295,7 @@ class DropWindow:
 
         target_row = tk.Frame(self.body, bg=BG)
         target_row.pack(fill="x", padx=pad, pady=(px(8), 0))
-        tk.Label(target_row, text="Target size (MB, optional)", fg=SUBTLE, bg=BG,
+        tk.Label(target_row, text=tr("Target size (MB, optional)"), fg=SUBTLE, bg=BG,
                  font=(FONT, 9)).pack(side="left")
         target_var = tk.StringVar(value="")
         tk.Entry(target_row, textvariable=target_var, width=10, bg=SURFACE, fg=FG,
@@ -4853,7 +5304,7 @@ class DropWindow:
 
         gpu_ok = _ffmpeg_has_encoder("h264_nvenc")
         gpu_var = tk.BooleanVar(value=False)
-        gpu_text = "Use NVIDIA GPU (NVENC)" if gpu_ok else "GPU encoding unavailable"
+        gpu_text = tr("Use NVIDIA GPU (NVENC)") if gpu_ok else tr("GPU encoding unavailable")
         gpu_check = tk.Checkbutton(self.body, text=gpu_text, variable=gpu_var,
                                    fg=FG if gpu_ok else SUBTLE, bg=BG,
                                    selectcolor=HOVER, activebackground=BG,
@@ -4893,9 +5344,9 @@ class DropWindow:
         self._clear()
         self.state = "params"
         pad = px(16)
-        tk.Label(self.body, text=action.label, fg=FG, bg=BG, font=(FONT, 11, "bold"),
+        tk.Label(self.body, text=tr(action.label), fg=FG, bg=BG, font=(FONT, 11, "bold"),
                  anchor="w").pack(fill="x", padx=pad, pady=(px(14), px(2)))
-        tk.Label(self.body, text=caption, fg=SUBTLE, bg=BG, font=(FONT, 9),
+        tk.Label(self.body, text=tr(caption), fg=SUBTLE, bg=BG, font=(FONT, 9),
                  anchor="w").pack(fill="x", padx=pad)
         var = tk.IntVar(value=default)
         val = tk.Label(self.body, text=f"{default}{unit}", fg=ACCENT, bg=BG,
@@ -4912,20 +5363,38 @@ class DropWindow:
         self._clear()
         self.state = "working"
         pad = px(16)
-        tk.Label(self.body, text=title, fg=FG, bg=BG, font=(FONT, 11, "bold"),
+        tk.Label(self.body, text=tr(title), fg=FG, bg=BG, font=(FONT, 11, "bold"),
                  anchor="w").pack(fill="x", padx=pad, pady=(px(16), px(4)))
-        self.status = tk.Label(self.body, text="Starting\u2026", fg=SUBTLE, bg=BG,
+        self.status = tk.Label(self.body, text=tr("Starting…"), fg=SUBTLE, bg=BG,
                                font=(FONT, 9), anchor="w", justify="left",
                                wraplength=px(290))
         self.status.pack(fill="x", padx=pad)
-        pb = ttk.Progressbar(self.body, mode="indeterminate",
-                             style="DF.Horizontal.TProgressbar", length=px(290))
-        pb.pack(padx=pad, pady=(px(10), px(12)))
-        pb.start(12)
-        self.cancel_btn = self._button(self.body, "Cancel", self.request_cancel, center=True)
-        self.cancel_btn.pack(fill="x", padx=pad, pady=(0, px(10)))
-        tk.Label(self.body, text="Esc also cancels", fg=SUBTLE, bg=BG,
-                 font=(FONT, 8)).pack(pady=(0, px(10)))
+        self.batch_label = tk.Label(self.body, text="", fg=ACCENT, bg=BG,
+                                    font=(FONT, 9, "bold"), anchor="w")
+        self.batch_label.pack(fill="x", padx=pad, pady=(px(12), px(2)))
+        self.progress_bar = ttk.Progressbar(
+            self.body, mode="indeterminate",
+            style="DF.Horizontal.TProgressbar", length=px(290))
+        self.progress_bar.pack(padx=pad, pady=(px(4), px(8)))
+        self.progress_bar.start(12)
+        tk.Label(self.body, text=tr("Recent activity"), fg=SUBTLE, bg=BG,
+                 font=(FONT, 8), anchor="w").pack(fill="x", padx=pad)
+        self.activity_box = tk.Text(
+            self.body, height=4, width=40, bg=SURFACE, fg=SUBTLE,
+            relief="flat", wrap="word", font=(FONT, 8), padx=6, pady=4,
+            highlightthickness=0, state="disabled")
+        self.activity_box.pack(fill="x", padx=pad, pady=(px(2), px(8)))
+        line = tk.Frame(self.body, bg=BG)
+        line.pack(fill="x", padx=pad)
+        self.elapsed_label = tk.Label(line, text="0:00", fg=SUBTLE, bg=BG,
+                                      font=(FONT, 8), anchor="w")
+        self.elapsed_label.pack(side="left")
+        self.cancel_btn = self._button(line, "Cancel", self.request_cancel, center=True)
+        self.cancel_btn.pack(side="right")
+        tk.Label(self.body, text=tr("Esc also cancels"), fg=SUBTLE, bg=BG,
+                 font=(FONT, 8)).pack(pady=(px(4), px(10)))
+        self._work_started = time.monotonic()
+        self._tick_elapsed()
         self._bind_dnd_tree()
         self._fit()
 
@@ -4933,14 +5402,49 @@ class DropWindow:
         self._clear()
         self.state = "done"
         pad = px(16)
-        title = ("!  Done with warnings" if res.failed else "\u2713  Done")
+        title = tr("Done with warnings") if res.failed else "\u2713  " + tr("Done")
         title_fg = ACCENT if res.failed else GREEN
         tk.Label(self.body, text=title, fg=title_fg, bg=BG, font=(FONT, 12, "bold"),
                  anchor="w").pack(fill="x", padx=pad, pady=(px(14), px(2)))
         tk.Label(self.body, text=res.message, fg=FG, bg=BG, font=(FONT, 9), anchor="w",
                  justify="left", wraplength=px(300)).pack(fill="x", padx=pad)
+        try:
+            before = sum(p.stat().st_size for p in self.paths
+                         if Path(p).is_file())
+            outputs = [Path(p) for p in res.outputs]
+            after = sum(p.stat().st_size for p in outputs
+                        if p.is_file())
+        except Exception:
+            before = after = 0
+        if before and after and outputs:
+            card = tk.Frame(self.body, bg=SURFACE)
+            card.pack(fill="x", padx=pad, pady=(px(8), 0))
+            tk.Label(card, text=tr("Before"), fg=SUBTLE, bg=SURFACE,
+                     font=(FONT, 8)).grid(row=0, column=0, padx=px(10),
+                                          pady=(px(6), 0), sticky="w")
+            tk.Label(card, text=fmt_size(before), fg=FG, bg=SURFACE,
+                     font=(FONT, 11, "bold")).grid(row=1, column=0,
+                                                   padx=px(10), sticky="w")
+            arrow = "\u2192"
+            tk.Label(card, text=arrow, fg=ACCENT, bg=SURFACE,
+                     font=(FONT, 13, "bold")).grid(row=1, column=1)
+            tk.Label(card, text=tr("After"), fg=SUBTLE, bg=SURFACE,
+                     font=(FONT, 8)).grid(row=0, column=2, padx=px(10),
+                                          pady=(px(6), 0), sticky="w")
+            tk.Label(card, text=fmt_size(after), fg=FG, bg=SURFACE,
+                     font=(FONT, 11, "bold")).grid(row=1, column=2,
+                                                   padx=px(10), sticky="w")
+            if after < before:
+                saved = 100 - after * 100 / before
+                badge = tk.Label(card, text=f"-{saved:.0f}%", fg=GREEN,
+                                 bg=SURFACE, font=(FONT, 9, "bold"))
+            else:
+                badge = tk.Label(card, text=tr("Output"), fg=SUBTLE,
+                                 bg=SURFACE, font=(FONT, 9, "bold"))
+            badge.grid(row=1, column=3, padx=(px(2), px(10)), sticky="e")
+            card.grid_columnconfigure(3, weight=1)
         if res.failed:
-            tk.Label(self.body, text="Some items failed. Open the log for details.",
+            tk.Label(self.body, text=tr("Some items failed. Open the log for details."),
                      fg=SUBTLE, bg=BG, font=(FONT, 8), anchor="w").pack(
                 fill="x", padx=pad, pady=(px(2), 0))
         if res.preview:
@@ -4991,9 +5495,9 @@ class DropWindow:
         self._clear()
         self.state = "cancelled"
         pad = px(16)
-        tk.Label(self.body, text="Cancelled", fg=ACCENT, bg=BG, font=(FONT, 12, "bold"),
+        tk.Label(self.body, text=tr("Cancelled"), fg=ACCENT, bg=BG, font=(FONT, 12, "bold"),
                  anchor="w").pack(fill="x", padx=pad, pady=(px(14), px(2)))
-        tk.Label(self.body, text="The job was stopped. Incomplete output was cleaned up.",
+        tk.Label(self.body, text=tr("The job was stopped. Incomplete output was cleaned up."),
                  fg=FG, bg=BG, font=(FONT, 9), anchor="w", justify="left",
                  wraplength=px(290)).pack(fill="x", padx=pad)
         row = tk.Frame(self.body, bg=BG)
@@ -5010,12 +5514,12 @@ class DropWindow:
         self.state = "error"
         self._last_error = message
         pad = px(16)
-        tk.Label(self.body, text="Something went wrong", fg=RED, bg=BG,
+        tk.Label(self.body, text=tr("Something went wrong"), fg=RED, bg=BG,
                  font=(FONT, 12, "bold"), anchor="w").pack(fill="x", padx=pad,
                                                           pady=(px(14), px(2)))
         tk.Label(self.body, text=message[:600], fg=FG, bg=BG, font=(FONT, 9), anchor="w",
                  justify="left", wraplength=px(300)).pack(fill="x", padx=pad)
-        tk.Label(self.body, text=f"Full details: {log_path().name}",
+        tk.Label(self.body, text=f"{tr('Full details:')} {log_path().name}",
                  fg=SUBTLE, bg=BG, font=(FONT, 8), anchor="w").pack(
             fill="x", padx=pad, pady=(px(2), 0))
         row = tk.Frame(self.body, bg=BG)
@@ -5050,12 +5554,12 @@ class DropWindow:
         self._close_password_dialog()
         if self.cancel_btn is not None:
             try:
-                self.cancel_btn.config(text="Cancelling\u2026", fg=SUBTLE)
+                self.cancel_btn.config(text=tr("Cancelling…"), fg=SUBTLE)
             except tk.TclError:
                 pass
         if self.status is not None:
             try:
-                self.status.config(text="Stopping the current job\u2026")
+                self.status.config(text=tr("Stopping the current job…"))
             except tk.TclError:
                 pass
 
@@ -5088,6 +5592,32 @@ class DropWindow:
                 self.status.config(text=text)
             except tk.TclError:
                 pass
+        if self.activity_box is not None:
+            try:
+                self.activity_box.config(state="normal")
+                self.activity_box.insert("end", text + "\n")
+                lines = int(self.activity_box.index("end-1c").split(".")[0])
+                if lines > 4:
+                    self.activity_box.delete("1.0", f"{lines - 4}.0")
+                self.activity_box.see("end")
+                self.activity_box.config(state="disabled")
+            except tk.TclError:
+                pass
+        if self.progress_bar is not None:
+            match = re.search(r"\b(\d+)\s*/\s*(\d+)\b", text or "")
+            if match:
+                current, total = int(match.group(1)), int(match.group(2))
+                if total > 0:
+                    try:
+                        self.progress_bar.stop()
+                        self.progress_bar.config(mode="determinate",
+                                                 maximum=total,
+                                                 value=min(current, total))
+                        if self.batch_label is not None:
+                            self.batch_label.config(
+                                text=f"{tr('Step')} {current} / {total}")
+                    except tk.TclError:
+                        pass
 
     def on_done(self, res: Result):
         self.busy = False
@@ -5127,7 +5657,7 @@ class PasswordDialog:
         body.pack(fill="both", expand=True, padx=1, pady=1)
         pad = px(16)
 
-        tk.Label(body, text="Password required", fg=FG, bg=BG,
+        tk.Label(body, text=tr("Password required"), fg=FG, bg=BG,
                  font=(FONT, 12, "bold"), anchor="w").pack(
             fill="x", padx=pad, pady=(px(14), px(2)))
         name = request.archive
@@ -5136,7 +5666,7 @@ class PasswordDialog:
         tk.Label(body, text=name, fg=ACCENT, bg=BG, font=(FONT, 9, "bold"),
                  anchor="w", justify="left", wraplength=px(300)).pack(
             fill="x", padx=pad)
-        tk.Label(body, text=f"{request.kind} archive", fg=SUBTLE, bg=BG,
+        tk.Label(body, text=f"{request.kind} " + ("أرشيف" if get_language() == "ar" else "archive"), fg=SUBTLE, bg=BG,
                  font=(FONT, 8), anchor="w").pack(fill="x", padx=pad)
         self.error = tk.Label(body, text=request.error, fg=RED, bg=BG,
                               font=(FONT, 9), anchor="w", justify="left",
@@ -5149,7 +5679,7 @@ class PasswordDialog:
                               highlightthickness=0, bd=0)
         self.entry.pack(fill="x", padx=pad, pady=(px(6), px(2)), ipady=px(6))
         self.show_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(body, text="Show password", variable=self.show_var,
+        tk.Checkbutton(body, text=tr("Show password"), variable=self.show_var,
                        command=self._toggle_show, fg=SUBTLE, bg=BG,
                        selectcolor=HOVER, activebackground=BG,
                        activeforeground=FG, font=(FONT, 8),
@@ -5188,7 +5718,7 @@ class PasswordDialog:
         t.after(80, lambda: self.alive and force_foreground(t, alt_trick=True))
 
     def _button(self, parent, text, command, primary=False):
-        b = tk.Label(parent, text=text, bg=ACCENT if primary else SURFACE,
+        b = tk.Label(parent, text=tr(text), bg=ACCENT if primary else SURFACE,
                      fg=BG if primary else FG, cursor="hand2",
                      font=(FONT, 10, "bold" if primary else "normal"),
                      padx=px(14), pady=px(7), anchor="center")
@@ -5215,7 +5745,7 @@ class PasswordDialog:
             return
         password = self.var.get()
         if not password:
-            self.error.config(text="Enter a password.")
+            self.error.config(text=tr("Enter a password."))
             return
         self.request.password = password
         self.request.cancelled = False
@@ -5252,13 +5782,214 @@ class PasswordDialog:
 # --------------------------------------------------------------------------- #
 #  UI: settings window
 # --------------------------------------------------------------------------- #
+class AppearanceWindow:
+    """Theme cards, accent color and motion preferences."""
+
+    def __init__(self, app: "App"):
+        self.app = app
+        self.alive = True
+        self.pending_theme = str(app.cfg.get("theme", "midnight"))
+        self.pending_accent = str(app.cfg.get("accent", ""))
+        self.pending_motion = bool(app.cfg.get("reduce_motion", False))
+        t = self.top = tk.Toplevel(app.root)
+        t.title(f"{APP_NAME} {tr('Appearance')}")
+        t.configure(bg=BG)
+        t.resizable(False, False)
+        t.attributes("-topmost", True)
+        t.protocol("WM_DELETE_WINDOW", self.close)
+        t.bind("<Escape>", lambda e: self.close())
+        f = tk.Frame(t, bg=BG, padx=px(16), pady=px(14))
+        f.pack()
+        tk.Label(f, text=tr("Appearance"), fg=FG, bg=BG,
+                 font=(FONT, 14, "bold")).pack(anchor="w")
+        tk.Label(f, text=tr("Choose a theme, then adjust the accent."),
+                 fg=SUBTLE, bg=BG, font=(FONT, 9)).pack(anchor="w",
+                                                       pady=(0, px(8)))
+        self.preview = tk.Canvas(f, width=px(300), height=px(128), bg=BG,
+                                 highlightthickness=0)
+        self.preview.pack(pady=(0, px(8)))
+        self._draw_preview()
+
+        cards = tk.Frame(f, bg=BG)
+        cards.pack()
+        names = appearance_names()
+        self._cards = {}
+        for i, name in enumerate(names):
+            cv = tk.Canvas(cards, width=px(92), height=px(58), bg=BG,
+                           highlightthickness=0, cursor="hand2")
+            cv.grid(row=i // 3, column=i % 3, padx=px(3), pady=px(3))
+            cv.bind("<Button-1>", lambda e, n=name: self._pick_theme(n))
+            self._cards[name] = cv
+            self._draw_card(cv, name)
+
+        accent_row = tk.Frame(f, bg=BG)
+        accent_row.pack(fill="x", pady=(px(8), px(2)))
+        tk.Label(accent_row, text=tr("Accent"), fg=SUBTLE, bg=BG,
+                 font=(FONT, 9, "bold")).pack(side="left")
+        for color in ("#4c8dff", "#22d3ee", "#34d399", "#fbbf24",
+                      "#fb7185", "#c084fc", "#f97316", "#e5e7eb"):
+            b = tk.Label(accent_row, bg=color, width=2, height=1, bd=0,
+                         cursor="hand2", relief="flat")
+            b.pack(side="left", padx=px(2))
+            b.bind("<Button-1>", lambda e, c=color: self._pick_accent(c))
+        self._btn(accent_row, "Custom…", self._custom_accent).pack(
+            side="left", padx=(px(6), 0))
+        self.contrast_label = tk.Label(f, text="", fg=SUBTLE, bg=BG,
+                                       font=(FONT, 8), anchor="w")
+        self.contrast_label.pack(fill="x", pady=(px(2), px(2)))
+
+        self.motion = tk.BooleanVar(value=self.pending_motion)
+        tk.Checkbutton(f, text=tr("Reduce motion"), variable=self.motion,
+                       fg=FG, bg=BG, selectcolor=HOVER,
+                       activebackground=BG, activeforeground=FG,
+                       font=(FONT, 9), highlightthickness=0, bd=0).pack(
+            anchor="w", pady=(px(4), 0))
+        tk.Label(f, text=tr("High Contrast is available as a theme card."),
+                 fg=SUBTLE, bg=BG, font=(FONT, 8)).pack(anchor="w")
+
+        row = tk.Frame(f, bg=BG)
+        row.pack(fill="x", pady=(px(12), 0))
+        self._btn(row, "Cancel", self.close).pack(side="right", padx=px(3))
+        self._btn(row, "Apply", self.apply, primary=True).pack(
+            side="right", padx=px(3))
+        t.update_idletasks()
+        w, h = t.winfo_reqwidth(), t.winfo_reqheight()
+        sw, sh = t.winfo_screenwidth(), t.winfo_screenheight()
+        t.geometry(f"+{max(8, (sw - w) // 2)}+{max(8, (sh - h) // 2)}")
+        dark_titlebar(t)
+        round_window(t)
+        self._refresh_status()
+
+    def _btn(self, parent, text, command, primary=False):
+        return tk.Button(parent, text=tr(text), command=command, relief="flat",
+                         bd=0, cursor="hand2", bg=ACCENT if primary else HOVER,
+                         fg=BG if primary else FG,
+                         activebackground=ACCENT_HI if primary else SURFACE,
+                         activeforeground=BG if primary else ACCENT,
+                         font=(FONT, 9, "bold" if primary else "normal"),
+                         padx=px(11), pady=px(5))
+
+    def _theme_tokens(self):
+        if appearance is None:
+            return {"bg": BG, "fg": FG, "accent": ACCENT, "accent_hi": ACCENT_HI,
+                    "surface": SURFACE, "hover": HOVER, "subtle": SUBTLE,
+                    "green": GREEN, "red": RED}
+        return appearance.resolve_theme(self.pending_theme,
+                                        self.pending_accent)[1]
+
+    def _draw_card(self, canvas, name):
+        tokens = (appearance.resolve_theme(name, "")[1] if appearance
+                  else self._theme_tokens())
+        canvas.delete("all")
+        canvas.create_rectangle(1, 1, px(90), px(56), fill=tokens["bg"],
+                                outline=ACCENT if name == self.pending_theme
+                                else tokens["hover"], width=2 if
+                                name == self.pending_theme else 1)
+        canvas.create_rectangle(px(8), px(9), px(60), px(17),
+                                fill=tokens["surface"], outline="")
+        canvas.create_oval(px(7), px(24), px(15), px(32),
+                           fill=tokens["accent"], outline="")
+        canvas.create_text(px(20), px(28), text=tr(appearance_label(name)),
+                           fill=tokens["fg"], font=(FONT, 6), anchor="w")
+        canvas.create_rectangle(px(8), px(39), px(76), px(43),
+                                fill=tokens["hover"], outline="")
+        canvas.create_rectangle(px(8), px(39), px(52), px(43),
+                                fill=tokens["accent"], outline="")
+
+    def _draw_preview(self):
+        tokens = self._theme_tokens()
+        c = self.preview
+        c.delete("all")
+        w, h = px(300), px(128)
+        c.create_rectangle(0, 0, w, h, fill=BG, outline="")
+        c.create_rectangle(1, 1, w - 1, h - 1, fill=tokens["bg"],
+                           outline=tokens["accent"], width=2)
+        c.create_text(px(16), px(16), text="DropFlow", anchor="w",
+                      fill=tokens["fg"], font=(FONT, 10, "bold"))
+        c.create_text(px(16), px(34), text="12.4 MB  ·  PDF", anchor="w",
+                      fill=tokens["subtle"], font=(FONT, 7))
+        c.create_rectangle(px(16), px(48), px(284), px(72),
+                           fill=tokens["surface"], outline="")
+        c.create_text(px(24), px(60), text="Compress PDF", anchor="w",
+                      fill=tokens["fg"], font=(FONT, 8))
+        c.create_rectangle(px(16), px(84), px(284), px(100),
+                           fill=tokens["hover"], outline="")
+        c.create_rectangle(px(16), px(84), px(180), px(100),
+                           fill=tokens["accent"], outline="")
+        c.create_rectangle(px(16), px(108), px(120), px(112),
+                           fill=tokens["accent"], outline="")
+        c.create_text(px(284), px(110), text="Done", anchor="e",
+                      fill=tokens["green"], font=(FONT, 7, "bold"))
+
+    def _pick_theme(self, name):
+        self.pending_theme = name
+        for card_name, canvas in self._cards.items():
+            self._draw_card(canvas, card_name)
+        self._draw_preview()
+        self._refresh_status()
+
+    def _pick_accent(self, color):
+        tokens = self._theme_tokens()
+        bg = tokens["bg"]
+        if appearance is not None:
+            safe, ratio = appearance.safe_accent(color, bg)
+        else:
+            safe, ratio = color, 21.0
+        self.pending_accent = safe
+        self._draw_preview()
+        self._refresh_status(selected=color, ratio=ratio, adjusted=safe != color)
+
+    def _custom_accent(self):
+        from tkinter import colorchooser
+        initial = self.pending_accent or self._theme_tokens()["accent"]
+        chosen = colorchooser.askcolor(color=initial, parent=self.top,
+                                       title=tr("Choose accent color"))
+        if chosen and chosen[1]:
+            self._pick_accent(chosen[1])
+
+    def _refresh_status(self, selected=None, ratio=None, adjusted=False):
+        tokens = self._theme_tokens()
+        accent = self.pending_accent or tokens["accent"]
+        if ratio is None and appearance is not None:
+            ratio = appearance.contrast_ratio(accent, tokens["bg"])
+        text = tr("Accent contrast: {ratio}:1").format(
+            ratio=f"{ratio:.1f}" if ratio else "0")
+        if adjusted:
+            text += "  ·  " + tr("auto-adjusted for readability")
+        self.contrast_label.config(
+            text=text, fg=GREEN if ratio and ratio >= 4.5 else RED)
+
+    def apply(self):
+        self.pending_motion = bool(self.motion.get())
+        self.app.apply_appearance(self.pending_theme, self.pending_accent,
+                                  self.pending_motion)
+        if self.app.settings is not None:
+            try:
+                self.app.settings.close(resume=False)
+            except Exception:
+                pass
+        self.close()
+        self.app._open_settings()
+
+    def close(self):
+        if not self.alive:
+            return
+        self.alive = False
+        try:
+            self.top.destroy()
+        except Exception:
+            pass
+        if getattr(self.app, "appearance", None) is self:
+            self.app.appearance = None
+
+
 class SettingsWindow:
     def __init__(self, app: "App"):
         self.app = app
         self.alive, self.recording = True, False
         self.pending = app.cfg["hotkey"]
         t = self.top = tk.Toplevel(app.root)
-        t.title(f"{APP_NAME} Settings")
+        t.title(f"{APP_NAME} {tr('Settings')}")
         t.configure(bg=BG)
         t.resizable(False, False)
         t.attributes("-topmost", True)
@@ -5273,7 +6004,7 @@ class SettingsWindow:
 
         f = tk.Frame(t, bg=BG, padx=px(22), pady=px(18))
         f.pack()
-        tk.Label(f, text="Global shortcut", fg=FG, bg=BG,
+        tk.Label(f, text=tr("Global shortcut"), fg=FG, bg=BG,
                  font=(FONT, 11, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
         self.var = tk.StringVar(value=pretty_hotkey(self.pending))
         tk.Entry(f, textvariable=self.var, state="readonly", readonlybackground=HOVER,
@@ -5282,8 +6013,8 @@ class SettingsWindow:
                                         pady=(px(8), px(2)))
         self.rec_btn = self._btn(f, "Record", self.record)
         self.rec_btn.grid(row=1, column=1, padx=(px(8), 0), pady=(px(8), px(2)))
-        tk.Label(f, text="Click Record, then press the new combination "
-                         "(e.g. Ctrl + Alt + Space). Esc cancels recording.",
+        tk.Label(f, text=tr("Click Record, then press the new combination "
+                            "(e.g. Ctrl + Alt + Space). Esc cancels recording."),
                  fg=SUBTLE, bg=BG, font=(FONT, 9), wraplength=px(350),
                  justify="left").grid(row=2, column=0, columnspan=2, sticky="w",
                                       pady=(px(2), 0))
@@ -5294,14 +6025,14 @@ class SettingsWindow:
                             wraplength=px(350), justify="left")
         self.err.grid(row=4, column=0, columnspan=2, sticky="w")
         self.auto = tk.BooleanVar(value=bool(app.cfg.get("autostart")))
-        tk.Checkbutton(f, text="Start DropFlow with Windows", variable=self.auto, fg=FG,
+        tk.Checkbutton(f, text=tr("Start DropFlow with Windows"), variable=self.auto, fg=FG,
                        bg=BG, selectcolor=HOVER, activebackground=BG,
                        activeforeground=FG, font=(FONT, 10), highlightthickness=0,
                        bd=0).grid(row=5, column=0, columnspan=2, sticky="w",
                                   pady=(px(12), px(8)))
         tk.Frame(f, bg=HOVER, height=1).grid(row=6, column=0, columnspan=2,
                                              sticky="we", pady=px(8))
-        tk.Label(f, text="Detected helper programs", fg=FG, bg=BG,
+        tk.Label(f, text=tr("Detected helper programs"), fg=FG, bg=BG,
                  font=(FONT, 10, "bold")).grid(row=7, column=0, columnspan=2, sticky="w",
                                                pady=(0, px(4)))
         self.tool_labels = {}
@@ -5312,7 +6043,7 @@ class SettingsWindow:
             lab.grid(row=i, column=0, columnspan=2, sticky="w")
             self.tool_labels[key] = lab
 
-        tk.Label(f, text="OCR languages (Tesseract codes, combine with +)", fg=FG, bg=BG,
+        tk.Label(f, text=tr("OCR languages (Tesseract codes, combine with +)"), fg=FG, bg=BG,
                  font=(FONT, 10, "bold")).grid(row=12, column=0, columnspan=2,
                                                sticky="w", pady=(px(10), px(2)))
         self.ocr_var = tk.StringVar(value=app.cfg.get("ocr_langs", "ara+eng"))
@@ -5325,12 +6056,61 @@ class SettingsWindow:
             anchor="w")
         self.ocr_hint.grid(row=14, column=0, columnspan=2, sticky="w")
 
+        tk.Label(f, text=tr("Language"), fg=FG, bg=BG,
+                 font=(FONT, 10, "bold")).grid(row=15, column=0, columnspan=2,
+                                               sticky="w", pady=(px(10), px(2)))
+        lang_names = list(LANGUAGES.values())
+        current_lang = LANGUAGES.get(self.app.cfg.get("language", "en"), "English")
+        self.lang_var = tk.StringVar(value=current_lang)
+        self.lang_box = ttk.Combobox(f, textvariable=self.lang_var, width=30,
+                                     state="readonly", values=lang_names,
+                                     font=(FONT, 9))
+        self.lang_box.grid(row=16, column=0, columnspan=2, sticky="we")
+
+        self.remember_var = tk.BooleanVar(
+            value=bool(self.app.cfg.get("remember_position", True)))
+        tk.Checkbutton(f, text=tr("Remember window position"),
+                       variable=self.remember_var, fg=FG, bg=BG,
+                       selectcolor=HOVER, activebackground=BG,
+                       activeforeground=FG, font=(FONT, 10),
+                       highlightthickness=0, bd=0).grid(
+            row=17, column=0, columnspan=2, sticky="w", pady=(px(8), 0))
+        self.updates_var = tk.BooleanVar(
+            value=bool(self.app.cfg.get("check_updates", True)))
+        tk.Checkbutton(f, text=tr("Check for updates on startup"),
+                       variable=self.updates_var, fg=FG, bg=BG,
+                       selectcolor=HOVER, activebackground=BG,
+                       activeforeground=FG, font=(FONT, 10),
+                       highlightthickness=0, bd=0).grid(
+            row=18, column=0, columnspan=2, sticky="w")
+        self.explorer_var = tk.BooleanVar(
+            value=bool(self.app.cfg.get("explorer_menu", False)))
+        tk.Checkbutton(f, text=tr("Add 'Send to DropFlow' to the Explorer context menu"),
+                       variable=self.explorer_var, fg=FG, bg=BG,
+                       selectcolor=HOVER, activebackground=BG,
+                       activeforeground=FG, font=(FONT, 10), wraplength=px(350),
+                       justify="left", highlightthickness=0, bd=0).grid(
+            row=19, column=0, columnspan=2, sticky="w")
+
         row = tk.Frame(f, bg=BG)
-        row.grid(row=15, column=0, columnspan=2, sticky="e", pady=(px(14), 0))
+        row.grid(row=20, column=0, columnspan=2, sticky="e", pady=(px(14), 0))
+        self._btn(row, "Appearance", self.open_appearance).pack(side="left", padx=px(4))
         self._btn(row, "Reset default", self.reset).pack(side="left", padx=px(4))
         self._btn(row, "Open log", self.open_log).pack(side="left", padx=px(4))
         self._btn(row, "Cancel", self.cancel).pack(side="left", padx=px(4))
         self._btn(row, "Save", self.save, primary=True).pack(side="left", padx=(px(4), 0))
+
+        if is_rtl():
+            try:
+                f.grid_columnconfigure(0, weight=1)
+                for child in f.winfo_children():
+                    info = child.grid_info()
+                    if info and str(info.get("sticky", "")) == "w":
+                        child.grid_configure(sticky="e")
+                    if isinstance(child, tk.Label):
+                        child.configure(anchor="e", justify="right")
+            except Exception:
+                pass
 
         t.update_idletasks()
         w, h = t.winfo_reqwidth(), t.winfo_reqheight()
@@ -5339,12 +6119,13 @@ class SettingsWindow:
         y = max(8, min((sh - h) // 2, sh - h - 48))
         t.geometry(f"+{x}+{y}")
         dark_titlebar(t)
+        round_window(t)
         self._update_active()
         t.after(30, self._refresh_tools)
         t.after(80, lambda: force_foreground(t, alt_trick=False))
 
     def _btn(self, parent, text, command, primary=False):
-        return tk.Button(parent, text=text, command=command, relief="flat", bd=0,
+        return tk.Button(parent, text=tr(text), command=command, relief="flat", bd=0,
                          cursor="hand2", bg=ACCENT if primary else HOVER,
                          fg=BG if primary else FG,
                          activebackground=ACCENT_HI if primary else SURFACE,
@@ -5352,15 +6133,18 @@ class SettingsWindow:
                          font=(FONT, 10, "bold" if primary else "normal"),
                          padx=px(14), pady=px(6))
 
+    def open_appearance(self):
+        self.app._open_appearance()
+
     def _update_active(self):
         if not self.alive:
             return
         if getattr(self.app, "hotkey_ok", False):
-            self.active.config(text=f"Active now: {pretty_hotkey(self.app.cfg['hotkey'])}",
+            self.active.config(text=f"{tr('Active now:')} {pretty_hotkey(self.app.cfg['hotkey'])}",
                                fg=GREEN)
         else:
             err = getattr(self.app, "hotkey_error", "")
-            text = "Active shortcut: none"
+            text = tr("Active shortcut: none")
             if err:
                 text += f" \u2014 {err}"
             self.active.config(text=text, fg=RED)
@@ -5402,7 +6186,7 @@ class SettingsWindow:
             if lab is None:
                 continue
             try:
-                lab.config(text=ok_text if value else missing_text,
+                lab.config(text=tr(ok_text) if value else tr(missing_text),
                            fg=GREEN if value else SUBTLE)
             except tk.TclError:
                 pass
@@ -5415,7 +6199,7 @@ class SettingsWindow:
                          + (" \u2026" if len(langs) > 16 else "")
                          + "  \u00b7  combine with +")
             else:
-                self.ocr_hint.config(text="Tesseract is not available, so OCR will be disabled.")
+                self.ocr_hint.config(text=tr("Tesseract is not available, so OCR will be disabled."))
         except tk.TclError:
             pass
 
@@ -5518,7 +6302,14 @@ class SettingsWindow:
         if lang_err:
             self.err.config(text=lang_err, fg=RED)
             return
-        ok, msg = self.app.apply_settings(self.pending, self.auto.get(), langs)
+        language = next((code for code, name in LANGUAGES.items()
+                         if name == self.lang_var.get()), "en")
+        ok, msg = self.app.apply_settings(
+            self.pending, self.auto.get(), langs,
+            remember_position=self.remember_var.get(),
+            language=language,
+            check_updates=self.updates_var.get(),
+            explorer_menu=self.explorer_var.get())
         if ok:
             self.close(resume=False)
         else:
@@ -5563,13 +6354,24 @@ class App:
     def __init__(self):
         global SCALE
         self.cfg = load_config()
+        set_language(str(self.cfg.get("language", "en")))
+        apply_appearance(str(self.cfg.get("theme", "midnight")),
+                         str(self.cfg.get("accent", "")),
+                         bool(self.cfg.get("reduce_motion", False)))
         self.q: queue.Queue = queue.Queue()
         self.win: DropWindow | None = None
         self.settings: SettingsWindow | None = None
+        self.appearance: AppearanceWindow | None = None
         self._last_toggle = 0.0
         self._quitting = False
         self.hotkey_ok = False
         self.hotkey_error = ""
+        self.update_info = None
+        self._update_checking = False
+        self.update_available = None
+        self._ipc_sock: socket.socket | None = None
+        self._ipc_stop = threading.Event()
+        self._ipc_thread: threading.Thread | None = None
 
         self.root = TkinterDnD.Tk()
         self.root.withdraw()
@@ -5587,14 +6389,8 @@ class App:
                         bordercolor=BG, lightcolor=ACCENT, darkcolor=ACCENT,
                         thickness=px(6))
 
-        self.icon = pystray.Icon(APP_NAME, make_tray_image(), APP_NAME, pystray.Menu(
-            pystray.MenuItem("Open drop zone", lambda i, it: self.q.put(("toggle",)),
-                             default=True),
-            pystray.MenuItem("Settings", lambda i, it: self.q.put(("settings",))),
-            pystray.MenuItem("Open log", lambda i, it: self.q.put(("log",))),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", lambda i, it: self.q.put(("quit",))),
-        ))
+        self.icon = pystray.Icon(APP_NAME, make_tray_image(), APP_NAME,
+                                 self._tray_menu())
 
         self.hotkey = HotkeyManager(lambda: self.q.put(("toggle",)))
         self.hotkey.start()
@@ -5612,10 +6408,49 @@ class App:
             self.hotkey_error = ""
         self.root.after(60, self._poll)
         self.root.after(1400, self._hello)
+        self._start_ipc()
+        if self.cfg.get("explorer_menu", False):
+            try:
+                set_explorer_menu(True)
+            except Exception:
+                log.exception("Could not refresh Explorer menu at startup")
+
+    def save_window_position(self, x: int, y: int) -> None:
+        if not self.cfg.get("remember_position", True):
+            return
+        self.cfg["window_x"] = int(x)
+        self.cfg["window_y"] = int(y)
+        save_config(self.cfg)
+
+    def apply_appearance(self, setting: str, accent: str = "",
+                         reduce_motion: bool = False) -> str:
+        actual = apply_appearance(setting, accent, reduce_motion)
+        self.cfg["theme"] = setting
+        self.cfg["accent"] = appearance.normalize_hex(accent, "") if appearance and accent else ""
+        self.cfg["reduce_motion"] = bool(reduce_motion)
+        save_config(self.cfg)
+        try:
+            style = ttk.Style(self.root)
+            style.configure("DF.Horizontal.TProgressbar", troughcolor=HOVER,
+                            background=ACCENT, bordercolor=BG, lightcolor=ACCENT,
+                            darkcolor=ACCENT, thickness=px(6))
+        except Exception:
+            pass
+        try:
+            self.icon.icon = make_tray_image()
+            self.icon.title = APP_NAME
+            self._refresh_tray()
+        except Exception:
+            pass
+        return actual
 
     # ----- hotkey --------------------------------------------------------- #
     def apply_settings(self, hotkey: str, autostart: bool,
-                       ocr_langs: str | None = None) -> tuple[bool, str]:
+                       ocr_langs: str | None = None,
+                       remember_position: bool = True,
+                       language: str = "en",
+                       check_updates: bool = True,
+                       explorer_menu: bool = False) -> tuple[bool, str]:
         ok, err = self.hotkey.register(hotkey)
         if not ok:
             restored, restore_err = self.hotkey.register(self.cfg["hotkey"])
@@ -5627,6 +6462,11 @@ class App:
         self.hotkey_error = ""
         if ocr_langs:
             self.cfg["ocr_langs"] = ocr_langs
+        self.cfg["remember_position"] = bool(remember_position)
+        self.cfg["language"] = language if language in LANGUAGES else "en"
+        self.cfg["check_updates"] = bool(check_updates)
+        self.cfg["explorer_menu"] = bool(explorer_menu)
+        set_language(self.cfg["language"])
         auto_error = ""
         try:
             set_autostart(autostart)
@@ -5635,19 +6475,188 @@ class App:
             log.exception("Autostart change failed")
         else:
             self.cfg["autostart"] = autostart
+        try:
+            set_explorer_menu(bool(explorer_menu))
+        except Exception as exc:
+            auto_error = f"{auto_error}\n{exc}".strip()
+            log.exception("Explorer menu change failed")
         save_config(self.cfg)
+        self._refresh_tray()
         if auto_error:
-            self.notify("Shortcut saved, but the startup setting failed.")
-            return False, ("The shortcut is active, but Windows startup could not be "
+            self.notify("Settings saved, but a Windows integration change failed.")
+            return False, ("The shortcut is active, but a Windows setting could not be "
                            f"changed:\n{auto_error}")
         self.notify(f"Shortcut set to {pretty_hotkey(hotkey)}")
         return True, ""
     # ----- plumbing ------------------------------------------------------- #
+    # ----- single-instance handoff --------------------------------------- #
+    def _start_ipc(self) -> None:
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", 0))
+            sock.listen(8)
+            sock.settimeout(0.5)
+            self._ipc_sock = sock
+            port = sock.getsockname()[1]
+            tmp = INSTANCE_PATH.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"port": port, "pid": os.getpid()}),
+                           encoding="utf-8")
+            os.replace(tmp, INSTANCE_PATH)
+            self._ipc_thread = threading.Thread(
+                target=self._ipc_loop, name="DropFlowIPC", daemon=True)
+            self._ipc_thread.start()
+        except Exception:
+            log.exception("Could not start the single-instance listener")
+
+    def _ipc_loop(self) -> None:
+        while not self._ipc_stop.is_set():
+            if self._ipc_sock is None:
+                return
+            try:
+                conn, _addr = self._ipc_sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            try:
+                with conn:
+                    conn.settimeout(2)
+                    chunks = []
+                    size = 0
+                    while True:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        size += len(chunk)
+                        if size > 1_000_000 or b"\n" in chunk:
+                            break
+                    raw = b"".join(chunks).split(b"\n", 1)[0]
+                    data = json.loads(raw.decode("utf-8"))
+                    self.q.put(("incoming", data))
+                    conn.sendall(b"OK\n")
+            except Exception:
+                log.exception("Single-instance message failed")
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def _stop_ipc(self) -> None:
+        self._ipc_stop.set()
+        try:
+            if self._ipc_sock is not None:
+                self._ipc_sock.close()
+        except Exception:
+            pass
+        try:
+            if self._ipc_thread is not None:
+                self._ipc_thread.join(1)
+        except Exception:
+            pass
+        try:
+            INSTANCE_PATH.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def show_paths(self, paths: list[str]) -> None:
+        values = [Path(p) for p in paths if Path(p).exists()]
+        if not values:
+            return
+        if self.win is not None and self.win.alive and not self.win.closing:
+            if self.win.busy:
+                self.notify("DropFlow is busy. Finish or cancel the current job first.")
+                return
+            self.win._apply_drop(values)
+            try:
+                self.win.top.lift()
+                force_foreground(self.win.top)
+            except Exception:
+                pass
+            return
+        saved_x = self.cfg.get("window_x")
+        saved_y = self.cfg.get("window_y")
+        if (self.cfg.get("remember_position", True)
+                and isinstance(saved_x, int) and isinstance(saved_y, int)):
+            x, y = saved_x, saved_y
+        else:
+            x, y = self.root.winfo_pointerxy()
+        apply_ui_scale(self.root, monitor_dpi_at(x, y) / 96.0)
+        self.win = DropWindow(self, x, y)
+        self.win.show_menu(values)
+
     def notify(self, message: str):
         try:
             self.icon.notify(message[:220], APP_NAME)
         except Exception:
             log.info("Notify: %s", message)
+
+    def _tray_menu(self):
+        update_label = None
+        if self.update_info is not None:
+            update_label = f"{tr('Update available')} ({self.update_info.version})"
+        items = [
+            pystray.MenuItem(tr("Open drop zone"),
+                             lambda i, it: self.q.put(("toggle",)), default=True),
+            pystray.MenuItem(tr("Settings"),
+                             lambda i, it: self.q.put(("settings",))),
+            pystray.MenuItem(tr("Appearance"),
+                             lambda i, it: self.q.put(("appearance",))),
+            pystray.MenuItem(tr("Open log"),
+                             lambda i, it: self.q.put(("log",))),
+        ]
+        if update_label:
+            items.append(pystray.MenuItem(
+                update_label, lambda i, it: self.q.put(("open_update",))))
+        else:
+            items.append(pystray.MenuItem(
+                tr("Check for updates"),
+                lambda i, it: self.q.put(("check_updates",))))
+        items += [
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(tr("Quit"),
+                             lambda i, it: self.q.put(("quit",))),
+        ]
+        return pystray.Menu(*items)
+
+    def _refresh_tray(self):
+        try:
+            self.icon.menu = self._tray_menu()
+            update = getattr(self.icon, "update_menu", None)
+            if callable(update):
+                update()
+        except Exception:
+            log.exception("Could not refresh tray menu")
+
+    def _maybe_check_updates(self, force: bool = False):
+        if app_update is None or self._update_checking:
+            return
+        if not force and not self.cfg.get("check_updates", True):
+            return
+        if not force and not app_update.should_check(
+                self.cfg.get("last_update_check", 0), time.time()):
+            return
+        self._update_checking = True
+
+        def work():
+            try:
+                info = app_update.check_latest(APP_VERSION)
+                self.q.put(("update_done", info))
+            except Exception as exc:
+                log.info("Update check failed: %s", exc)
+                self.q.put(("update_done", None))
+
+        threading.Thread(target=work, name="DropFlowUpdateCheck",
+                         daemon=True).start()
+
+    def _open_update(self):
+        url = (self.update_info.url if self.update_info is not None
+               else (app_update.RELEASES_URL if app_update else ""))
+        if url:
+            open_url(url)
 
     def _hello(self):
         if self.hotkey_error:
@@ -5656,6 +6665,7 @@ class App:
         else:
             self.notify(f"DropFlow is running in the tray. Press "
                         f"{pretty_hotkey(self.cfg['hotkey'])} to open the drop zone.")
+        self._maybe_check_updates()
 
     def _poll(self):
         try:
@@ -5678,10 +6688,34 @@ class App:
             self._toggle()
         elif kind == "settings":
             self._open_settings()
+        elif kind == "appearance":
+            self._open_appearance()
         elif kind == "log":
             open_path(DATA_DIR / "dropflow.log")
         elif kind == "quit":
             self.quit()
+        elif kind == "check_updates":
+            self._maybe_check_updates(force=True)
+        elif kind == "open_update":
+            self._open_update()
+        elif kind == "incoming":
+            data = msg[1] if len(msg) > 1 and isinstance(msg[1], dict) else {}
+            paths = data.get("paths") or []
+            if paths:
+                self.show_paths(paths)
+            else:
+                self._toggle()
+        elif kind == "update_done":
+            self._update_checking = False
+            self.cfg["last_update_check"] = time.time()
+            save_config(self.cfg)
+            info = msg[1]
+            if info is not None:
+                self.update_info = info
+                log.info("Update available: %s", info.version)
+                self._refresh_tray()
+                self.notify(f"DropFlow {info.version} is available. "
+                            f"Open the tray menu to update.")
         elif kind == "progress":
             if msg[1].alive:
                 msg[1].on_progress(msg[2])
@@ -5719,7 +6753,13 @@ class App:
         if self.win and self.win.alive and not self.win.closing:
             self.win.close()
             return
-        x, y = self.root.winfo_pointerxy()
+        saved_x = self.cfg.get("window_x")
+        saved_y = self.cfg.get("window_y")
+        if (self.cfg.get("remember_position", True)
+                and isinstance(saved_x, int) and isinstance(saved_y, int)):
+            x, y = saved_x, saved_y
+        else:
+            x, y = self.root.winfo_pointerxy()
         apply_ui_scale(self.root, monitor_dpi_at(x, y) / 96.0)
         self.win = DropWindow(self, x, y)
 
@@ -5736,6 +6776,18 @@ class App:
         apply_ui_scale(self.root, primary_dpi() / 96.0)
         self.settings = SettingsWindow(self)
 
+    def _open_appearance(self):
+        if self._quitting:
+            return
+        if self.appearance and self.appearance.alive:
+            try:
+                self.appearance.top.lift()
+                force_foreground(self.appearance.top, alt_trick=False)
+            except tk.TclError:
+                pass
+            return
+        self.appearance = AppearanceWindow(self)
+
     def quit(self):
         if self._quitting:
             return
@@ -5750,6 +6802,11 @@ class App:
                 self.settings.close(resume=False)
             except Exception:
                 pass
+        if self.appearance is not None:
+            try:
+                self.appearance.close()
+            except Exception:
+                pass
         try:
             self.hotkey.stop()
         except Exception:
@@ -5758,6 +6815,7 @@ class App:
             self.icon.stop()
         except Exception:
             pass
+        self._stop_ipc()
         try:
             self.root.destroy()
         except Exception:
@@ -5771,12 +6829,16 @@ class App:
 def main():
     if "--selftest" in sys.argv:
         raise SystemExit(_selftest())
+    initial_paths = _cli_paths()
     _relaunch_without_console()
-    _ensure_single_instance()
+    _ensure_single_instance(initial_paths)
     _setup_logging()
     log.info("DropFlow starting (pid=%s, python=%s)", os.getpid(), sys.executable)
     try:
-        App().run()
+        app = App()
+        if initial_paths:
+            app.q.put(("incoming", {"paths": initial_paths}))
+        app.run()
     except SystemExit:
         raise
     except Exception:
@@ -5803,6 +6865,7 @@ def _selftest() -> int:
     try:
         tmp = _new_temp_dir("dropflow_selftest_")
         item("Python", True, sys.version.split()[0])
+        item("Version", True, APP_VERSION)
         item("Frozen", True, str(getattr(sys, "frozen", False)))
 
         # Imports that are easy to lose during packaging.
@@ -5925,6 +6988,7 @@ def _selftest() -> int:
                          + (f" ({_OFFICE_IMPORT_ERROR})" if _OFFICE_IMPORT_ERROR else ""))
         else:
             lines.append("INFO Office converter: ready")
+        lines.append("INFO Update checker: " + ("ready" if app_update else "unavailable"))
     except Exception:
         item("selftest crash", False, traceback.format_exc())
     finally:
@@ -5947,3 +7011,18 @@ def _selftest() -> int:
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
