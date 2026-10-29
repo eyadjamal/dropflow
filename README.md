@@ -26,6 +26,7 @@ No cloud. No telemetry. No account required.
 - Audio extraction
 - Tray icon and native global hotkey
 - Batch processing with per-file error handling
+- Draggable floating window
 
 ## Download and run
 
