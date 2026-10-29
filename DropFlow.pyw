@@ -38,7 +38,8 @@ office_converter.py; keep that file next to DropFlow.pyw too.
 Included tools: PDF merge/compress/split/page ranges/export/OCR, searchable
 PDFs, image and GIF conversion, Word/PowerPoint/Excel/text conversion, ZIP/RAR
 extraction with password prompts, video compression with
-resolution/target-size/GPU options, and audio extraction.
+resolution/target-size/GPU options, and audio extraction.  The floating window
+can be dragged anywhere on screen with the mouse.
 
 Debugging: run "python DropFlow.pyw --console" to keep a console attached.
 """
@@ -4310,6 +4311,9 @@ class DropWindow:
         self.status: tk.Label | None = None
         self.cancel_btn: tk.Label | None = None
         self.password_dialog: "PasswordDialog | None" = None
+        self._drag_origin: tuple[int, int] | None = None
+        self._drag_window: tuple[int, int] | None = None
+        self._drag_moved = False
 
         t = self.top = tk.Toplevel(app.root)
         t.withdraw()
@@ -4321,6 +4325,9 @@ class DropWindow:
         self.body.pack(fill="both", expand=True, padx=1, pady=1)
         t.bind("<Escape>", self._on_escape)
         t.bind("<Motion>", self._on_motion)
+        t.bind("<Button-1>", self._begin_drag, add="+")
+        t.bind("<B1-Motion>", self._drag_motion, add="+")
+        t.bind("<ButtonRelease-1>", self._end_drag, add="+")
         self._bind_dnd(t)
         self._bind_dnd(self.body)
         self.show_drop_zone()
@@ -4353,6 +4360,54 @@ class DropWindow:
         x = max(vx + 8, min(self.cx - w // 2, vx + vw - w - 8))
         y = max(vy + 8, min(self.cy - h // 2, vy + vh - h - 56))
         t.geometry(f"{w}x{h}+{x}+{y}")
+
+    @staticmethod
+    def _drag_blocked(widget) -> bool:
+        """Do not turn clicks on controls into window drags."""
+        try:
+            cls = widget.winfo_class()
+            if cls in {"Entry", "TEntry", "TCombobox", "Scale", "Checkbutton",
+                       "Button", "TButton", "Text", "Spinbox", "TSpinbox"}:
+                return True
+            if str(widget.cget("cursor")) == "hand2":
+                return True
+        except tk.TclError:
+            return True
+        return False
+
+    def _begin_drag(self, event):
+        self._drag_moved = False
+        self._drag_origin = None
+        self._drag_window = None
+        if self._drag_blocked(event.widget):
+            return
+        self._drag_origin = (event.x_root, event.y_root)
+        self._drag_window = (self.top.winfo_x(), self.top.winfo_y())
+        try:
+            self.top.lift()
+        except tk.TclError:
+            pass
+
+    def _drag_motion(self, event):
+        if self._drag_origin is None or self._drag_window is None:
+            return
+        dx = event.x_root - self._drag_origin[0]
+        dy = event.y_root - self._drag_origin[1]
+        if abs(dx) < 3 and abs(dy) < 3:
+            return
+        self._drag_moved = True
+        x = self._drag_window[0] + dx
+        y = self._drag_window[1] + dy
+        self.top.geometry(f"+{x}+{y}")
+        try:
+            self.cx = x + self.top.winfo_width() // 2
+            self.cy = y + self.top.winfo_height() // 2
+        except tk.TclError:
+            pass
+
+    def _end_drag(self, _event=None):
+        self._drag_origin = None
+        self._drag_window = None
 
     def _refocus(self):
         if not self.alive:
