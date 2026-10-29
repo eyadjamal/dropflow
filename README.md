@@ -1,4 +1,5 @@
 # DropFlow
+Version 3.2.0
 
 ### Drop it. Convert it. Done.
 ![DropFlow](dropflow3.png)
@@ -9,7 +10,7 @@ task, and the result is created beside the original file.
 
 No cloud. No telemetry. No account required.
 
-[![Download for Windows](https://img.shields.io/badge/Download-Windows-2ea44f?style=for-the-badge)](https://github.com/eyadjamal1998-hash/dropflow/releases/latest/download/DropFlow-Windows.zip)
+[![Download for Windows](https://img.shields.io/badge/Download-Windows-2ea44f?style=for-the-badge)](https://github.com/eyadjamal/dropflow/releases/latest/download/DropFlow-Setup.exe)
 
 ## Features
 
@@ -27,11 +28,20 @@ No cloud. No telemetry. No account required.
 - Tray icon and native global hotkey
 - Batch processing with per-file error handling
 - Draggable floating window
+- New appearance features
+- Theme list
+- Arabic/RTL support
+- Installer download button
+- Portable ZIP option
+- SmartScreen warning
+- Offline/local processing note
+- Classic Explorer menu note
+- Modern-menu development status
 
 ## Download and run
 
-1. Download **`DropFlow-Windows.zip`** from the latest release.
-2. Extract the ZIP.
+1. Download **`DropFlow-Setup.exe`** from the latest release.
+2. Run the installer and follow the wizard.
 3. Run **`DropFlow.exe`**.
 4. Keep `DropFlow.exe` and the `_internal` folder together.
 
@@ -39,7 +49,7 @@ Python is **not** required.
 
 ### Direct download
 
-[Download DropFlow for Windows](https://github.com/eyadjamal1998-hash/dropflow/releases/latest/download/DropFlow-Windows.zip)
+[Download DropFlow for Windows](https://github.com/eyadjamal/dropflow/releases/latest/download/DropFlow-Setup.exe)
 
 ## ⚠️ SmartScreen warning
 
