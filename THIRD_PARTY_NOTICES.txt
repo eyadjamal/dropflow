@@ -8,8 +8,7 @@ PyInstaller bundles the Windows runtime and packages. Distribution must
 retain the applicable component notices and license terms from those packages.
 Refer to the included package metadata and upstream projects for their full terms.
 
-HEIC/HEIF image support and the pillow-heif image-codec dependency have been
-removed from this build. FFmpeg video/audio functionality is unchanged; its
+FFmpeg video/audio functionality is unchanged; its
 codec set and licensing are separate from image-format support.
 
 External tools such as LibreOffice, Tesseract, 7-Zip/UnRAR and Microsoft Office
