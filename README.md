@@ -6,10 +6,14 @@
 
 A local Windows tray utility for PDF, Office, image, archive, video and audio tasks. Drop files, choose an action, review the destination, and convert. No account, uploads or telemetry.
 
+[![Download for Windows](https://img.shields.io/badge/Download_for_Windows-v3.3.0-5944d6?style=for-the-badge&logo=windows)](https://github.com/eyadjamal/dropflow/releases/download/v3.3.0/DropFlow-Setup-3.3.0.exe)
+
+[Download portable ZIP](https://github.com/eyadjamal/dropflow/releases/download/v3.3.0/DropFlow-3.3.0-Portable.zip)
+
 [![Tests](https://github.com/eyadjamal/dropflow/actions/workflows/tests.yml/badge.svg)](https://github.com/eyadjamal/dropflow/actions/workflows/tests.yml)
 [Download source ZIP](https://github.com/eyadjamal/dropflow/archive/refs/heads/main.zip) · [Published Windows releases](https://github.com/eyadjamal/dropflow/releases)
 
-This branch contains **3.3.0** source and build configuration. Existing release downloads retain the version in their release title; updating the branch does not replace older release assets.
+The current source and Windows downloads are version **3.3.0**.
 
 ## What's new in 3.3.0
 
@@ -92,3 +96,4 @@ See [DEVELOPMENT.md](DEVELOPMENT.md), [ARCHITECTURE.md](ARCHITECTURE.md), [DESIG
 Conversions run locally. The optional update checker contacts the GitHub releases API. No document upload, telemetry or account is required.
 
 Source is licensed under [AGPL-3.0](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.txt).
+
