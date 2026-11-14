@@ -36,8 +36,8 @@ next to DropFlow.pyw.  Office/document conversion is provided by
 office_converter.py; keep that file next to DropFlow.pyw too.
 
 Included tools: PDF merge/compress/split/page ranges/export/OCR, searchable
-PDFs, image and GIF conversion, Word/PowerPoint/Excel/text conversion, ZIP/RAR
-extraction with password prompts, video compression with
+PDFs, image and GIF conversion, Word/PowerPoint/Excel/text
+conversion, ZIP/RAR extraction with password prompts, video compression with
 resolution/target-size/GPU options, and audio extraction.  The floating window
 can be dragged anywhere on screen, remembers its position, supports English
 and Arabic, checks GitHub for updates, and can be added to the Windows Explorer
@@ -71,6 +71,15 @@ from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Callable
+from action_menu import identity, sections, CATEGORIES
+from quality_presets import LABELS, VIDEO, values as preset_values
+from batch_jobs import ItemResult, execute as execute_batch, is_combined
+from ui_theme import configure_widgets
+from output_policy import route_output
+from output_panel import OutputPanel
+from saved_presets import load_presets, clean_output
+from pdf_organizer import export_pages
+from pdf_organizer_ui import PDFOrganizer
 import tkinter as tk
 from tkinter import ttk
 
@@ -289,7 +298,7 @@ except Exception:  # optional module; bundled normally
 #  Constants, theme, config, logging
 # --------------------------------------------------------------------------- #
 APP_NAME = "DropFlow"
-APP_VERSION = "3.2.0"
+APP_VERSION = "3.3.0"
 SUFFIX = "_dropflow"
 DEFAULT_HOTKEY = "ctrl+shift+d"
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif"}
@@ -311,10 +320,12 @@ SUBTLE = "#7f849c"
 GREEN = "#a6e3a1"
 RED = "#f38ba8"
 FONT = "Segoe UI"
+UI_RADIUS = 8
 THEME_NAME = "midnight"
 THEME_SETTING = "midnight"
 ACCENT_CUSTOM = ""
 REDUCED_MOTION = False
+WINDOW_ALPHA = 1.0
 THEME_TOKENS = {}
 
 
@@ -322,21 +333,23 @@ def apply_appearance(setting: str = "midnight", accent: str = "",
                      reduce_motion: bool = False) -> str:
     """Apply local theme tokens and return the actual theme name."""
     global BG, FG, ACCENT, ACCENT_HI, SURFACE, HOVER, SUBTLE, GREEN, RED
-    global THEME_NAME, THEME_SETTING, ACCENT_CUSTOM, REDUCED_MOTION, THEME_TOKENS
+    global THEME_NAME, THEME_SETTING, ACCENT_CUSTOM, REDUCED_MOTION
+    global THEME_TOKENS, WINDOW_ALPHA
     setting = setting if setting in ("system", "midnight", "slate", "ocean",
                                      "forest", "rose", "sepia", "light",
-                                     "high_contrast") else "midnight"
+                                     "high_contrast", "glass", "windows_glass", "win11_glass") else "midnight"
     actual, tokens = (appearance.resolve_theme(setting, accent)
                       if appearance is not None else
                       (setting if setting != "system" else "midnight",
                        {"bg": BG, "fg": FG, "accent": ACCENT, "accent_hi": ACCENT_HI,
                         "surface": SURFACE, "hover": HOVER, "subtle": SUBTLE,
-                        "green": GREEN, "red": RED}))
+                        "green": GREEN, "red": RED, "alpha": 1.0}))
     THEME_SETTING = setting
     THEME_NAME = actual
     THEME_TOKENS = tokens
     ACCENT_CUSTOM = appearance.normalize_hex(accent, "") if appearance and accent else ""
     REDUCED_MOTION = bool(reduce_motion)
+    WINDOW_ALPHA = float(tokens.get("alpha", 1.0))
     BG = tokens["bg"]
     FG = tokens["fg"]
     ACCENT = tokens["accent"]
@@ -366,6 +379,17 @@ SCALE = 1.0
 def px(n: float) -> int:
     """Scale a pixel size by the screen DPI factor."""
     return int(round(n * SCALE))
+
+
+def mix_hex(start: str, end: str, amount: float) -> str:
+    """Interpolate two #rrggbb colours for Tk hover transitions."""
+    try:
+        a = tuple(int(start[i:i + 2], 16) for i in (1, 3, 5))
+        b = tuple(int(end[i:i + 2], 16) for i in (1, 3, 5))
+        return "#{:02x}{:02x}{:02x}".format(
+            *[int(a[i] + (b[i] - a[i]) * amount) for i in range(3)])
+    except Exception:
+        return end
 
 
 DATA_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / APP_NAME
@@ -410,7 +434,7 @@ def load_config() -> dict:
            "language": "en", "remember_position": True, "window_x": None,
            "window_y": None, "check_updates": True, "last_update_check": 0,
            "explorer_menu": False, "theme": "midnight", "accent": "",
-           "reduce_motion": False, "favorite_actions": []}
+           "reduce_motion": False, "favorite_actions": [], "action_usage": {}, "saved_presets": [], "output_defaults": {}}
     try:
         data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         if isinstance(data, dict):
@@ -442,6 +466,19 @@ def load_config() -> dict:
             if isinstance(accent, str) and accent.strip():
                 cfg["accent"] = accent.strip()
             cfg["reduce_motion"] = bool(data.get("reduce_motion", False))
+            cfg["saved_presets"] = load_presets(data.get("saved_presets", []))
+            defaults = data.get("output_defaults", {})
+            if isinstance(defaults, dict):
+                for key, value in defaults.items():
+                    try:
+                        if isinstance(key, str):
+                            cfg["output_defaults"][key] = clean_output(value)
+                    except ValueError:
+                        pass
+            usage = data.get("action_usage", {})
+            if isinstance(usage, dict):
+                cfg["action_usage"] = {key: value for key, value in usage.items()
+                                       if isinstance(key, str) and type(value) is int and value >= 0}
             favorites = data.get("favorite_actions")
             if isinstance(favorites, list):
                 cfg["favorite_actions"] = [str(x) for x in favorites if isinstance(x, str)]
@@ -648,6 +685,92 @@ def round_window(win: tk.Misc) -> None:
         pass
 
 
+class _AccentPolicy(ctypes.Structure):
+    _fields_ = [("AccentState", ctypes.c_int),
+                ("AccentFlags", ctypes.c_int),
+                ("GradientColor", ctypes.c_uint),
+                ("AnimationId", ctypes.c_int)]
+
+
+class _WindowCompositionAttributeData(ctypes.Structure):
+    _fields_ = [("Attribute", ctypes.c_int),
+                ("Data", ctypes.c_void_p),
+                ("SizeOfData", ctypes.c_size_t)]
+
+
+def _set_acrylic(hwnd, enabled: bool, tint=(21, 19, 33), alpha=200) -> bool:
+    """Enable Windows 10/11 acrylic blur behind a Tk top-level."""
+    try:
+        user32 = ctypes.windll.user32
+        setter = user32.SetWindowCompositionAttribute
+        setter.argtypes = [wintypes.HWND,
+                           ctypes.POINTER(_WindowCompositionAttributeData)]
+        setter.restype = ctypes.c_int
+        if not enabled:
+            policy = _AccentPolicy(0, 0, 0, 0)
+        else:
+            r, g, b = tint
+            gradient = ((alpha & 0xFF) << 24) | (b << 16) | (g << 8) | r
+            policy = _AccentPolicy(4, 2, gradient, 0)  # ACRYLICBLURBEHIND
+        data = _WindowCompositionAttributeData(
+            19, ctypes.cast(ctypes.byref(policy), ctypes.c_void_p),
+            ctypes.sizeof(policy))
+        return bool(setter(hwnd, ctypes.byref(data)))
+    except Exception:
+        return False
+
+
+class _Margins(ctypes.Structure):
+    _fields_ = [("cxLeftWidth", ctypes.c_int),
+                ("cxRightWidth", ctypes.c_int),
+                ("cyTopHeight", ctypes.c_int),
+                ("cyBottomHeight", ctypes.c_int)]
+
+
+def _enable_win11_backdrop(win: tk.Misc) -> bool:
+    """DWM acrylic backdrop, dark titlebar, rounded corners and frame extension."""
+    try:
+        win.update_idletasks()
+        hwnd = _user32.GetAncestor(win.winfo_id(), 2) or win.winfo_id()
+        dwm = ctypes.windll.dwmapi
+        dwm.DwmSetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD,
+                                              ctypes.c_void_p, wintypes.DWORD]
+        for attr, value in ((20, 1), (33, 2)):
+            data = ctypes.c_int(value)
+            dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(data),
+                                      ctypes.sizeof(data))
+        margins = _Margins(-1, -1, -1, -1)
+        dwm.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(margins))
+        if sys.getwindowsversion().build >= 22621:
+            backdrop = ctypes.c_int(3)  # DWMSBT_TRANSIENTWINDOW (acrylic)
+            dwm.DwmSetWindowAttribute(hwnd, 38, ctypes.byref(backdrop),
+                                      ctypes.sizeof(backdrop))
+        return True
+    except Exception:
+        return False
+
+
+def apply_window_glass(win: tk.Misc) -> float:
+    """Apply acrylic tint/alpha to a window and return its target alpha."""
+    glass = THEME_SETTING in ("glass", "windows_glass", "win11_glass") or THEME_NAME in ("glass", "windows_glass", "win11_glass")
+    try:
+        win.update_idletasks()
+        hwnd = _user32.GetAncestor(win.winfo_id(), 2) or win.winfo_id()
+        if glass:
+            if THEME_SETTING == "win11_glass":
+                _enable_win11_backdrop(win)
+            _set_acrylic(hwnd, True, THEME_TOKENS.get("glass_tint", (21, 19, 33)),
+                         int(WINDOW_ALPHA * 255))
+            alpha = WINDOW_ALPHA
+        else:
+            _set_acrylic(hwnd, False)
+            alpha = 1.0
+        win.attributes("-alpha", alpha)
+        return alpha
+    except Exception:
+        return WINDOW_ALPHA if glass else 1.0
+
+
 # --------------------------------------------------------------------------- #
 #  Monitor geometry and DPI
 # --------------------------------------------------------------------------- #
@@ -716,6 +839,55 @@ def primary_dpi() -> int:
     return monitor_dpi_at(0, 0)
 
 
+def configure_ttk(root: tk.Misc) -> None:
+    """Theme ttk widgets for the current dark/light palette."""
+    try:
+        style = ttk.Style(root)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        configure_widgets(root, {"bg": BG, "fg": FG, "surface": SURFACE, "accent": ACCENT, "hover": HOVER, "subtle": SUBTLE})
+        style.configure("DF.Horizontal.TProgressbar", troughcolor=HOVER,
+                        background=ACCENT, bordercolor=BG, lightcolor=ACCENT,
+                        darkcolor=ACCENT, thickness=px(6))
+        style.configure(
+            "TCombobox",
+            fieldbackground=SURFACE, background=SURFACE, foreground=FG,
+            arrowcolor=ACCENT, bordercolor=HOVER, lightcolor=SURFACE,
+            darkcolor=SURFACE, insertcolor=FG, selectbackground=HOVER,
+            selectforeground=FG, padding=px(3))
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", SURFACE), ("disabled", SURFACE)],
+            foreground=[("readonly", FG), ("disabled", SUBTLE)],
+            background=[("readonly", SURFACE), ("active", HOVER)],
+            arrowcolor=[("active", ACCENT_HI), ("disabled", SUBTLE)],
+            selectbackground=[("readonly", HOVER)],
+            selectforeground=[("readonly", FG)])
+        style.configure(
+            "TEntry", fieldbackground=SURFACE, foreground=FG, insertcolor=FG,
+            bordercolor=HOVER, lightcolor=SURFACE, darkcolor=SURFACE,
+            selectbackground=HOVER, selectforeground=FG)
+        style.map("TEntry",
+                  fieldbackground=[("disabled", SURFACE)],
+                  foreground=[("disabled", SUBTLE)])
+        style.configure("DF.Horizontal.TScale", background=BG, troughcolor=HOVER,
+                        bordercolor=HOVER, lightcolor=ACCENT, darkcolor=ACCENT)
+    except Exception:
+        pass
+
+
+def choose_ui_font(root: tk.Misc) -> None:
+    """Use Segoe UI Variable when available, otherwise Segoe UI."""
+    global FONT
+    try:
+        families = set(tkfont.families(root))
+        FONT = "Segoe UI Variable" if "Segoe UI Variable" in families else "Segoe UI"
+    except Exception:
+        FONT = "Segoe UI"
+
+
 def apply_ui_scale(root: tk.Misc, scale: float) -> None:
     """Set global layout scale and Tk font scaling for the target monitor."""
     global SCALE
@@ -736,6 +908,7 @@ class Result:
     preview: str | None = None
     clipboard: str | None = None
     failed: int = 0
+    errors: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -787,16 +960,7 @@ def require(module: str, pip_name: str | None = None):
 
 def get_unique_filename(path, is_dir: bool = False) -> Path:
     """Never overwrite: report_dropflow.pdf -> report_dropflow (1).pdf -> (2) ..."""
-    p = Path(path)
-    if not p.exists():
-        return p
-    stem, suffix = (p.name, "") if is_dir else (p.stem, p.suffix)
-    n = 1
-    while True:
-        candidate = p.with_name(f"{stem} ({n}){suffix}")
-        if not candidate.exists():
-            return candidate
-        n += 1
+    return route_output(path, is_dir)
 
 
 def derive_output(src: Path, ext: str | None = None) -> Path:
@@ -1306,6 +1470,8 @@ def _ffprobe_audio_info(path: Path) -> tuple[str | None, int | None]:
 #  Image helpers
 # --------------------------------------------------------------------------- #
 def load_image(path: Path) -> Image.Image:
+    if Path(path).suffix.lower() in {".heic", ".heif", ".heics", ".heifs", ".hif"}:
+        raise ValueError(tr("HEIC/HEIF images are not supported."))
     im = Image.open(path)
     im = ImageOps.exif_transpose(im)
     im.load()
@@ -1313,6 +1479,13 @@ def load_image(path: Path) -> Image.Image:
 
 
 def flatten_rgb(im: Image.Image) -> Image.Image:
+    # Scale high-bit-depth image data to 8-bit L first
+    # instead of letting PIL's RGB conversion clip them.
+    if im.mode in ("I;16", "I;16L", "I;16B", "I"):
+        try:
+            im = im.convert("I").point(lambda value: value // 256).convert("L")
+        except Exception:
+            log.exception("Could not down-convert a 16-bit image; using RGB conversion")
     if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
         rgba = im.convert("RGBA")
         bg = Image.new("RGB", rgba.size, (255, 255, 255))
@@ -1416,6 +1589,16 @@ def _pdf_files(paths) -> list[Path]:
     return [Path(p) for p in paths if Path(p).is_file() and Path(p).suffix.lower() == ".pdf"]
 
 
+def act_organize_pdf(paths, opts, ctx: JobContext) -> Result:
+    plan = opts.get("_pdf_plan", [])
+    if not plan:
+        raise ValueError("Open the PDF organizer and keep at least one page.")
+    first = Path(paths[0])
+    output = get_unique_filename(first.with_name(f"{first.stem}_organized{SUFFIX}.pdf"))
+    export_pages(plan, output, paths, ctx)
+    return Result(f"{len(plan)} {tr('pages')}: {output.name}", [output])
+
+
 def act_merge_pdfs(paths, opts, ctx: JobContext) -> Result:
     pdfs = _pdf_files(paths)
     if len(pdfs) < 2:
@@ -1456,7 +1639,7 @@ def act_merge_pdfs(paths, opts, ctx: JobContext) -> Result:
     good = len(pdfs) - len(errors)
     note = f" ({len(errors)} failed \u2014 see log)" if errors else ""
     return Result(f"Merged {good} PDF(s) into {out.name} ({pages} page(s), "
-                  f"{fmt_size(out.stat().st_size)}){note}", [out], failed=len(errors))
+                  f"{fmt_size(out.stat().st_size)}){note}", [out], failed=len(errors), errors=errors)
 
 
 def act_compress_pdfs(paths, opts, ctx: JobContext) -> Result:
@@ -1514,7 +1697,7 @@ def act_compress_pdfs(paths, opts, ctx: JobContext) -> Result:
     note = f" ({len(errors)} failed \u2014 see log)" if errors else ""
     extra = f" ({skipped} left unchanged)" if skipped else ""
     return Result(f"Compressed {len(outs)} PDF(s): {fmt_size(before)} -> {fmt_size(after)} "
-                  f"(-{saved:.0f}%){extra}{note}", outs, failed=len(errors))
+                  f"(-{saved:.0f}%){extra}{note}", outs, failed=len(errors), errors=errors)
 
 
 def act_split_pdf(paths, opts, ctx: JobContext) -> Result:
@@ -1576,7 +1759,7 @@ def act_split_pdf(paths, opts, ctx: JobContext) -> Result:
         return Result("No PDFs were split.")
     note = f" ({len(errors)} failed \u2014 see log)" if errors else ""
     return Result(f"Split {len(folders)} PDF(s) into {count} file(s) in "
-                  f"{len(folders)} folder(s){note}", folders, failed=len(errors))
+                  f"{len(folders)} folder(s){note}", folders, failed=len(errors), errors=errors)
 
 
 def _parse_page_ranges(spec, page_count: int) -> list[tuple[int, int]]:
@@ -1666,7 +1849,7 @@ def act_extract_pages(paths, opts, ctx: JobContext) -> Result:
         return Result("No pages were extracted.")
     note = f" ({len(errors)} failed \u2014 see log)" if errors else ""
     return Result(f"Extracted page ranges from {len(outs)} PDF(s){note}", outs,
-                  failed=len(errors))
+                  failed=len(errors), errors=errors)
 
 
 def act_split_ranges(paths, opts, ctx: JobContext) -> Result:
@@ -1725,7 +1908,7 @@ def act_split_ranges(paths, opts, ctx: JobContext) -> Result:
         return Result("No PDFs were split.")
     note = f" ({len(errors)} failed \u2014 see log)" if errors else ""
     return Result(f"Split {len(folders)} PDF(s) into {count} range file(s) in "
-                  f"{len(folders)} folder(s){note}", folders, failed=len(errors))
+                  f"{len(folders)} folder(s){note}", folders, failed=len(errors), errors=errors)
 
 
 def make_pdf_to_images(fmt: str) -> Callable:
@@ -1789,7 +1972,7 @@ def make_pdf_to_images(fmt: str) -> Callable:
             return Result("No pages were exported.")
         note = f" ({len(errors)} failed \u2014 see log)" if errors else ""
         return Result(f"Exported {count} page(s) as {fmt} images into "
-                      f"{len(folders)} folder(s){note}", folders, failed=len(errors))
+                      f"{len(folders)} folder(s){note}", folders, failed=len(errors), errors=errors)
 
     return run
 
@@ -1903,7 +2086,7 @@ def act_ocr(paths, opts, ctx: JobContext) -> Result:
     first = previews[0] if len(previews) == 1 else "\n\n".join(previews[:3])
     return Result(f"Extracted text from {len(outs)} image(s) -> .txt{note}", outs,
                   preview=visual_text(first), clipboard=first if len(outs) == 1 else None,
-                  failed=len(errors))
+                  failed=len(errors), errors=errors)
 
 
 def act_ocr_pdf(paths, opts, ctx: JobContext) -> Result:
@@ -2251,7 +2434,7 @@ def act_images_to_pdf(paths, opts, ctx: JobContext) -> Result:
             out.unlink(missing_ok=True)
     note = f" ({len(errors)} failed \u2014 see log)" if errors else ""
     return Result(f"Created {out.name} with {pages} page(s) "
-                  f"({fmt_size(out.stat().st_size)}){note}", [out], failed=len(errors))
+                  f"({fmt_size(out.stat().st_size)}){note}", [out], failed=len(errors), errors=errors)
 
 
 def act_mixed_to_pdf(paths, opts, ctx: JobContext) -> Result:
@@ -2302,7 +2485,7 @@ def act_mixed_to_pdf(paths, opts, ctx: JobContext) -> Result:
             out.unlink(missing_ok=True)
     note = f" ({len(errors)} failed \u2014 see log)" if errors else ""
     return Result(f"Combined {pdf_count} PDF(s) and {img_count} image(s) into {out.name} "
-                  f"({fmt_size(out.stat().st_size)}){note}", [out], failed=len(errors))
+                  f"({fmt_size(out.stat().st_size)}){note}", [out], failed=len(errors), errors=errors)
 
 
 def act_images_to_gif(paths, opts, ctx: JobContext) -> Result:
@@ -2363,13 +2546,19 @@ def act_images_to_gif(paths, opts, ctx: JobContext) -> Result:
             frame.close()
     note = f" ({len(errors)} failed \u2014 see log)" if errors else ""
     return Result(f"Animated GIF with {len(frames)} frames "
-                  f"({fmt_size(out.stat().st_size)}){note}", [out], failed=len(errors))
+                  f"({fmt_size(out.stat().st_size)}){note}", [out], failed=len(errors), errors=errors)
 
 
-_SAME_FORMAT = {"PNG": {".png"}, "JPG": {".jpg", ".jpeg"}, "WEBP": {".webp"}}
+_SAME_FORMAT = {
+    "PNG": {".png"},
+    "JPG": {".jpg", ".jpeg"},
+    "WEBP": {".webp"},
+}
 
 
 def make_convert(target: str) -> Callable:
+    if target not in _SAME_FORMAT:
+        raise ValueError(f"Unsupported image target: {target}")
     ext = {"PNG": ".png", "JPG": ".jpg", "WEBP": ".webp"}[target]
 
     def run(paths, opts, ctx: JobContext) -> Result:
@@ -2428,7 +2617,7 @@ def make_convert(target: str) -> Callable:
         if errors:
             extra += f" ({len(errors)} failed \u2014 see log)"
         return Result(f"Converted {len(outs)} image(s) to {target}{extra}", outs,
-                      failed=len(errors))
+                      failed=len(errors), errors=errors)
 
     return run
 
@@ -2507,7 +2696,7 @@ def act_compress_image(paths, opts, ctx: JobContext) -> Result:
     if errors:
         extra += f" ({len(errors)} failed \u2014 see log)"
     return Result(f"Compressed {len(outs)} image(s): {fmt_size(before)} -> {fmt_size(after)} "
-                  f"(-{saved:.0f}%){extra}", outs, failed=len(errors))
+                  f"(-{saved:.0f}%){extra}", outs, failed=len(errors), errors=errors)
 
 
 # --------------------------------------------------------------------------- #
@@ -2834,7 +3023,7 @@ def act_docx_to_pdf(paths, opts, ctx: JobContext) -> Result:
             msg += " LibreOffice could not convert at least one file; the built-in renderer was used."
         else:
             msg += " Install LibreOffice for pixel-perfect layouts."
-    return Result(msg, outs, failed=len(errors))
+    return Result(msg, outs, failed=len(errors), errors=errors)
 
 
 def act_docx_to_txt(paths, opts, ctx: JobContext) -> Result:
@@ -2883,7 +3072,7 @@ def act_docx_to_txt(paths, opts, ctx: JobContext) -> Result:
         return Result("No text was extracted.")
     note = f" ({len(errors)} failed \u2014 see log)" if errors else ""
     return Result(f"Extracted text from {len(outs)} document(s){note}", outs,
-                  failed=len(errors))
+                  failed=len(errors), errors=errors)
 
 
 def _require_office():
@@ -2970,7 +3159,7 @@ def act_convert_office(paths, opts, ctx: JobContext) -> Result:
     if methods:
         method_note = " (" + ", ".join(f"{v} {k}" for k, v in methods.items()) + ")"
     return Result(f"Converted {len(docs) - len(errors)} document(s) to "
-                  f"{target.upper()}{method_note}{note}", outs, failed=len(errors))
+                  f"{target.upper()}{method_note}{note}", outs, failed=len(errors), errors=errors)
 
 
 def act_images_pdf_to_pptx(paths, opts, ctx: JobContext) -> Result:
@@ -3039,7 +3228,7 @@ def act_data_to_xlsx(paths, opts, ctx: JobContext) -> Result:
         return Result("No workbooks were created.")
     note = f" ({len(errors)} failed \u2014 see log)" if errors else ""
     return Result(f"Created {len(outs)} Excel workbook(s){note}", outs,
-                  failed=len(errors))
+                  failed=len(errors), errors=errors)
 
 
 # --------------------------------------------------------------------------- #
@@ -3306,7 +3495,7 @@ def act_compress_video(paths, opts, ctx: JobContext) -> Result:
     if notes:
         note = " " + " ".join(notes[:3])
     return Result(f"Compressed {len(outs)} video(s): {fmt_size(before)} -> {fmt_size(after)} "
-                  f"(-{saved:.0f}%){extra}{note}", outs, failed=len(errors))
+                  f"(-{saved:.0f}%){extra}{note}", outs, failed=len(errors), errors=errors)
 
 
 def act_extract_audio(paths, opts, ctx: JobContext) -> Result:
@@ -3364,7 +3553,7 @@ def act_extract_audio(paths, opts, ctx: JobContext) -> Result:
     total = sum(o.stat().st_size for o in outs)
     note = f" ({len(errors)} failed \u2014 see log)" if errors else ""
     return Result(f"Extracted {kind} audio from {len(outs)} video(s) "
-                  f"({fmt_size(total)}){note}", outs, failed=len(errors))
+                  f"({fmt_size(total)}){note}", outs, failed=len(errors), errors=errors)
 
 
 def act_convert_media(paths, opts, ctx: JobContext) -> Result:
@@ -3446,7 +3635,7 @@ def act_convert_media(paths, opts, ctx: JobContext) -> Result:
         detail.append(f"{methods['audio']} audio")
     suffix = f" ({', '.join(detail)})" if detail else ""
     return Result(f"Converted {len(outs)} video(s) to {target.upper()}{suffix}{note}",
-                  outs, failed=len(errors))
+                  outs, failed=len(errors), errors=errors)
 
 
 # --------------------------------------------------------------------------- #
@@ -3923,7 +4112,7 @@ def _extract_archives(paths, ctx: JobContext) -> Result:
         return Result("No archives were extracted.")
     note = f" ({len(errors)} failed \u2014 see log)" if errors else ""
     return Result(f"Extracted {len(outs)} archive(s) into clean folder(s){note}",
-                  outs, failed=len(errors))
+                  outs, failed=len(errors), errors=errors)
 
 
 def act_extract_zip(paths, opts, ctx: JobContext) -> Result:
@@ -4001,7 +4190,7 @@ def act_zip(paths, opts, ctx: JobContext) -> Result:
         return Result("Nothing to archive.")
     note = f" ({len(errors)} failed \u2014 see log)" if errors else ""
     return Result(f"Created {out.name}: {count} file(s), "
-                  f"{fmt_size(out.stat().st_size)}{note}", [out], failed=len(errors))
+                  f"{fmt_size(out.stat().st_size)}{note}", [out], failed=len(errors), errors=errors)
 
 
 # --------------------------------------------------------------------------- #
@@ -4043,6 +4232,7 @@ def build_actions(paths: list[Path]) -> tuple[str, list[Action]]:
     archives = zips + rars
 
     if pdfs and len(pdfs) == len(paths):
+        acts.append(Action("Organize PDF pages…", act_organize_pdf))
         if many:
             acts.append(Action("Merge into one PDF", act_merge_pdfs))
         acts += [
@@ -4503,10 +4693,11 @@ def _keysym_token(keysym: str, event) -> str | None:
 #  UI: floating drop window
 # --------------------------------------------------------------------------- #
 class DropWindow:
-    MIN_W = 340
+    MIN_W = 390
 
     def __init__(self, app: "App", cx: int, cy: int):
         self.app, self.cx, self.cy = app, cx, cy
+        configure_ttk(app.root)
         self.paths: list[Path] = []
         self.actions: list[Action] = []
         self.alive, self.closing, self.busy = True, False, False
@@ -4525,6 +4716,7 @@ class DropWindow:
         self.elapsed_label: tk.Label | None = None
         self._work_timer = None
         self._work_started = 0.0
+        self._alpha_target = 1.0
 
         t = self.top = tk.Toplevel(app.root)
         t.withdraw()
@@ -4542,10 +4734,12 @@ class DropWindow:
         self._bind_dnd(t)
         self._bind_dnd(self.body)
         round_window(t)
+        self._alpha_target = apply_window_glass(t)
+        t.attributes("-alpha", 0.0)
         self.show_drop_zone()
         t.deiconify()
         self._fit()
-        self._fade(0.0, 1.0, 0.16)
+        self._fade(0.0, self._alpha_target, 0.16)
         t.after(30, self._refocus)
 
     # ----- plumbing ------------------------------------------------------- #
@@ -4587,7 +4781,7 @@ class DropWindow:
         try:
             cls = widget.winfo_class()
             if cls in {"Entry", "TEntry", "TCombobox", "Scale", "Checkbutton",
-                       "Button", "TButton", "Text", "Spinbox", "TSpinbox",
+                       "Button", "TButton", "TRadiobutton", "TCheckbutton", "Treeview", "Text", "Spinbox", "TSpinbox",
                        "Scrollbar", "TScrollbar"}:
                 return True
             if str(widget.cget("cursor")) == "hand2":
@@ -4640,6 +4834,9 @@ class DropWindow:
                 self.app.save_window_position(x + width // 2, y + height // 2)
         except Exception:
             pass
+
+    def refresh_glass(self) -> None:
+        self._alpha_target = apply_window_glass(self.top)
 
     def _refocus(self):
         if not self.alive:
@@ -4762,6 +4959,11 @@ class DropWindow:
         return "break"
 
     def close(self, *_):
+        organizer = getattr(self, "_organizer", None)
+        if organizer is not None and organizer.winfo_exists():
+            organizer.lift()
+            organizer.focus_force()
+            return
         if self.closing or not self.alive:
             return
         if self.busy:
@@ -4791,6 +4993,10 @@ class DropWindow:
             self.app.win = None
 
     def shutdown(self):
+        organizer = getattr(self, "_organizer", None)
+        if organizer is not None and organizer.winfo_exists():
+            organizer.dispose()
+            self._organizer = None
         """Called when the whole app quits; kills any running helper process."""
         self._remember_position()
         self._close_password_dialog()
@@ -4806,9 +5012,14 @@ class DropWindow:
     def _button(self, parent, text, command, primary=False, center=False):
         bg, fg = (ACCENT, BG) if primary else (SURFACE, FG)
         hbg, hfg = (ACCENT_HI, BG) if primary else (HOVER, ACCENT)
+        glass = THEME_SETTING == "win11_glass"
         b = tk.Label(parent, text=tr(text), bg=bg, fg=fg, cursor="hand2",
                      font=(FONT, 10, "bold" if primary else "normal"),
-                     anchor="center" if center else ("e" if is_rtl() else "w"), padx=px(12), pady=px(7))
+                     anchor="center" if center else ("e" if is_rtl() else "w"),
+                     padx=px(12), pady=px(7), bd=0,
+                     highlightthickness=1 if glass else 0,
+                     highlightbackground=mix_hex(BG, "#ffffff", 0.10)
+                     if glass else BG)
 
         def paint(b_bg, b_fg):
             try:
@@ -4816,8 +5027,35 @@ class DropWindow:
             except tk.TclError:
                 pass
 
-        b.bind("<Enter>", lambda e: paint(hbg, hfg))
-        b.bind("<Leave>", lambda e: paint(bg, fg))
+        if not glass:
+            b.bind("<Enter>", lambda e: paint(hbg, hfg))
+            b.bind("<Leave>", lambda e: paint(bg, fg))
+        else:
+            def animate(to_bg, to_fg):
+                old = getattr(b, "_df_hover_job", None)
+                if old is not None:
+                    try:
+                        b.after_cancel(old)
+                    except Exception:
+                        pass
+                    b._df_hover_job = None
+                from_bg, from_fg = b.cget("bg"), b.cget("fg")
+                steps = 8
+
+                def tick(step=0):
+                    if step > steps:
+                        b._df_hover_job = None
+                        return
+                    t = step / steps
+                    paint(mix_hex(from_bg, to_bg, t),
+                          mix_hex(from_fg, to_fg, t))
+                    step += 1
+                    b._df_hover_job = b.after(15, tick)
+
+                tick()
+
+            b.bind("<Enter>", lambda e: animate(hbg, hfg))
+            b.bind("<Leave>", lambda e: animate(bg, fg))
         b.bind("<Button-1>", lambda e: self.top.after(1, command))
         return b
 
@@ -4832,14 +5070,14 @@ class DropWindow:
     def show_drop_zone(self):
         self._clear()
         self.state = "zone"
-        W, H = px(310), px(176)
+        W, H = px(350), px(206)
         c = tk.Canvas(self.body, width=W, height=H, bg=BG, highlightthickness=0)
         c.pack(padx=px(10), pady=(px(10), px(4)))
         self.zone = c
         self._hover_job = None
         self._ripple_jobs = []
-        self.glow = c.create_oval(px(0), px(0), W, H, outline=ACCENT_HI,
-                                  width=1, state="hidden")
+        self.glow = c.create_rectangle(px(1), px(1), W - px(1), H - px(1),
+                                       outline=ACCENT_HI, width=1, state="hidden")
         self.rect = c.create_rectangle(px(4), px(4), W - px(4), H - px(4),
                                        outline=ACCENT, dash=(6, 4), width=2)
         mid = W // 2
@@ -4847,10 +5085,11 @@ class DropWindow:
                       arrowshape=(px(14), px(16), px(7)))
         c.create_line(mid - px(28), px(66), mid - px(28), px(90), mid + px(28), px(90),
                       mid + px(28), px(66), width=3, fill=ACCENT, joinstyle=tk.ROUND)
-        c.create_text(mid, px(118), text=tr("Drop files or folders here"), fill=FG,
-                      font=(FONT, 11, "bold"))
-        c.create_text(mid, px(142), text=tr("PDF · images · Word · video · ZIP"),
+        c.create_text(mid, px(125), text=tr("Drop files or folders here"), fill=FG,
+                      font=(FONT, 13, "bold"))
+        c.create_text(mid, px(155), text=tr("PDF · images · Word · video · ZIP"),
                       fill=SUBTLE, font=(FONT, 9))
+        c.create_text(mid, px(180), text=tr("Local tools. Ready when you are."), fill=SUBTLE, font=(FONT, 8))
         hint = (f"{pretty_hotkey(self.app.cfg['hotkey'])} "
                 + ("للفتح · Esc للإغلاق" if get_language() == "ar"
                    else "toggles  ·  Esc closes"))
@@ -4980,19 +5219,23 @@ class DropWindow:
         self._clear()
         self.state = "menu"
         rtl = is_rtl()
-        pad = px(14)
+        pad = px(18)
+        tk.Label(self.body, text="DROPFLOW", fg=ACCENT, bg=BG, font=(FONT, 9, "bold"),
+                 anchor="e" if rtl else "w").pack(fill="x", padx=pad, pady=(px(16), 0))
         head = tk.Frame(self.body, bg=BG)
-        head.pack(fill="x", padx=pad, pady=(px(12), 0))
-        tk.Label(head, text=summary, fg=FG, bg=BG, font=(FONT, 11, "bold"),
+        head.pack(fill="x", padx=pad, pady=(px(5), 0))
+        tk.Label(head, text=summary, fg=FG, bg=BG, font=(FONT, 18, "bold"),
                  anchor="e" if rtl else "w",
                  justify="right" if rtl else "left").pack(
             side="right" if rtl else "left")
         self._x_button(head).pack(side="left" if rtl else "right")
+        tk.Label(self.body, text=tr("Choose what to do with your files"), fg=SUBTLE, bg=BG,
+                 font=(FONT, 9), anchor="e" if rtl else "w").pack(fill="x", padx=pad, pady=(px(4), px(7)))
 
         self._thumb_refs = []
         strip = tk.Frame(self.body, bg=BG)
         strip.pack(fill="x", padx=pad, pady=(px(6), px(2)))
-        for p in paths[:4]:
+        for p in paths[:2]:
             chip = tk.Frame(strip, bg=SURFACE)
             chip.pack(side="right" if rtl else "left", padx=(px(5) if rtl else 0, 0 if rtl else px(5)))
             thumb = self._thumbnail(p)
@@ -5005,10 +5248,10 @@ class DropWindow:
                 tk.Label(chip, text=glyph, fg=color, bg=SURFACE,
                          font=(FONT, 9, "bold"), width=4).pack(
                     side="right" if rtl else "left", padx=px(3), pady=px(2))
-            tk.Label(chip, text=p.name[:18], fg=SUBTLE, bg=SURFACE,
-                     font=(FONT, 7)).pack(side="right" if rtl else "left", padx=(px(4) if rtl else 0, 0 if rtl else px(4)))
-        if len(paths) > 4:
-            tk.Label(strip, text=f"+{len(paths) - 4}", fg=SUBTLE, bg=BG,
+            tk.Label(chip, text=p.name[:22], fg=FG, bg=SURFACE,
+                     font=(FONT, 9)).pack(side="right" if rtl else "left", padx=(px(4) if rtl else 0, 0 if rtl else px(4)))
+        if len(paths) > 2:
+            tk.Label(strip, text=f"+{len(paths) - 2}", fg=SUBTLE, bg=BG,
                      font=(FONT, 8, "bold")).pack(side="right" if rtl else "left", padx=px(2))
 
         self._search_var = tk.StringVar()
@@ -5080,46 +5323,87 @@ class DropWindow:
         return None
 
     def _render_actions(self):
-        frame = getattr(self, "_actions_frame", None)
-        if frame is None:
-            return
+        frame = self._actions_frame
         for child in frame.winfo_children():
             child.destroy()
-        query = getattr(self, "_search_var", tk.StringVar()).get().strip().lower()
-        favorites = set(self.app.cfg.get("favorite_actions", []))
-        visible = [a for a in self.actions if query in tr(a.label).lower()]
-        visible.sort(key=lambda a: (a.label not in favorites,))
-        for a in visible:
-            row = tk.Frame(frame, bg=BG)
-            row.pack(fill="x", pady=px(1))
-            fav = a.label in favorites
-            star = tk.Label(row, text="\u2605" if fav else "\u2606",
-                            fg=ACCENT if fav else SUBTLE, bg=BG,
-                            cursor="hand2", font=(FONT, 10), width=2)
-            star.pack(side="right" if is_rtl() else "left")
-            star.bind("<Button-1>", lambda e, a=a: self._toggle_favorite(a))
-            self._button(row, a.label, lambda a=a: self.choose(a)).pack(
-                side="left", fill="x", expand=True)
+        query = self._search_var.get().strip().casefold()
+        favorites = self.app.cfg.get("favorite_actions", [])
+        counts = self.app.cfg.get("action_usage", {})
+        visible = [a for a in self.actions if query in tr(a.label).casefold()]
+        canvas = tk.Canvas(frame, bg=BG, highlightthickness=0, height=min(px(350), max(px(220), self.top.winfo_screenheight() - px(300))))
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        content = tk.Frame(canvas, bg=BG)
+        window = canvas.create_window(0, 0, anchor="nw", window=content)
+        content.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window, width=e.width))
+        def wheel(event):
+            canvas.yview_scroll(-int(event.delta / 120), "units")
+        def bind_wheel(widget):
+            widget.bind("<MouseWheel>", wheel)
+            for child in widget.winfo_children():
+                bind_wheel(child)
+        available = {identity(a): a for a in self.actions}
+        saved = [r for r in self.app.cfg.get("saved_presets", []) if r["action_id"] in available]
+        if saved:
+            ttk.Label(content, text=tr("Saved presets"), style="Muted.TLabel").pack(fill="x", pady=(px(10), px(5)))
+            for preset in saved:
+                action = available[preset["action_id"]]
+                if query and query not in preset["name"].casefold() and query not in tr(action.label).casefold():
+                    continue
+                def load(a=action, r=preset):
+                    if a.func == act_organize_pdf:
+                        self.open_pdf_organizer(a, preset_id=r["id"])
+                    else:
+                        self.show_output_options(a, r["options"], r["id"])
+                ttk.Button(content, text="↗  " + preset["name"], command=load, style="Action.TButton").pack(fill="x", pady=2)
+        expanded = getattr(self, "_expanded_categories", set())
+        self._expanded_categories = expanded
+        for title, actions in sections(visible, favorites, counts):
+            if not actions:
+                continue
+            grouped = title in CATEGORIES
+            opened = bool(query) or not grouped or title in expanded
+            def toggle(title=title):
+                expanded.symmetric_difference_update({title})
+                self._render_actions()
+            if grouped:
+                ttk.Button(content, text=("▾  " if opened else "▸  ") + tr(title) + f"  ·  {len(actions)}",
+                           command=toggle, style="Section.TButton").pack(fill="x", pady=px(2))
+            else:
+                tk.Label(content, text=tr(title), bg=BG, fg=SUBTLE,
+                         anchor="e" if is_rtl() else "w", font=(FONT, 9, "bold")).pack(fill="x", pady=(px(12), px(5)))
+            if opened:
+                for action in actions:
+                    row = tk.Frame(content, bg=BG)
+                    row.pack(fill="x", pady=px(2))
+                    favorite = identity(action) in favorites or action.label in favorites
+                    ttk.Button(row, text="★" if favorite else "☆", width=3, style="Favorite.TButton" if favorite else "Ghost.TButton",
+                               command=lambda a=action: self._toggle_favorite(a)).pack(
+                                   side="right" if is_rtl() else "left")
+                    ttk.Button(row, text=tr(action.label), command=lambda a=action: self.choose(a), style="Action.TButton").pack(fill="x", expand=True)
         if not visible:
-            tk.Label(frame, text=tr("No matching actions"), fg=SUBTLE, bg=BG,
-                     font=(FONT, 9)).pack(pady=px(8))
-        try:
-            self._fit()
-        except Exception:
-            pass
+            tk.Label(content, text=tr("No matching actions"), bg=BG, fg=SUBTLE).pack()
+        bind_wheel(content)
+        self._fit()
 
-    def _toggle_favorite(self, action: Action):
+    def _toggle_favorite(self, action):
         favorites = list(self.app.cfg.get("favorite_actions", []))
-        if action.label in favorites:
-            favorites.remove(action.label)
+        key = identity(action)
+        if key in favorites or action.label in favorites:
+            favorites = [x for x in favorites if x not in (key, action.label)]
         else:
-            favorites.append(action.label)
+            favorites.append(key)
         self.app.cfg["favorite_actions"] = favorites
         save_config(self.app.cfg)
         self._render_actions()
 
     def choose(self, action: Action):
-        if action.office_options:
+        if action.func == act_organize_pdf:
+            self.open_pdf_organizer(action)
+        elif action.office_options:
             self.show_office_params(action)
         elif action.media_options:
             self.show_media_params(action)
@@ -5131,6 +5415,45 @@ class DropWindow:
             self.show_params(action)
         else:
             self.start(action, {})
+
+    def open_pdf_organizer(self, action, preset_id=None, plan=None):
+        existing = getattr(self, "_organizer", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            return
+        def restore():
+            self._organizer = None
+            if self.alive and not self.closing:
+                self.top.deiconify()
+                self.top.lift()
+        def accept(sources, plan):
+            restore()
+            self.paths = [Path(p) for p in sources]
+            self.show_output_options(action, {"_pdf_plan": plan}, preset_id)
+        try:
+            self._cancel_timer()
+            organizer = PDFOrganizer(self.app.root, self.paths, accept, restore, tr,
+                {"bg": BG, "fg": FG, "surface": SURFACE, "accent": ACCENT, "hover": HOVER, "subtle": SUBTLE}, initial_plan=plan)
+            self._organizer = organizer
+            self.top.withdraw()
+            organizer.lift()
+            organizer.focus_force()
+        except Exception as exc:
+            restore()
+            self.show_error(str(exc))
+
+    def show_output_options(self, action, options, preset_id=None):
+        self._clear()
+        self.state = "output"
+        self._output_panel = OutputPanel(self.body, action, options, self.paths,
+            self.app.cfg, save_config,
+            lambda resolved: self.start(action, resolved, prepared=True),
+            lambda: self.open_pdf_organizer(action, preset_id, options["_pdf_plan"])
+                if "_pdf_plan" in options else self.choose(action), tr, preset_id)
+        self._output_panel.pack(fill="both", expand=True)
+        self._bind_dnd_tree()
+        self._fit()
+        self.top.bind("<Return>", lambda e: self._output_panel.submit())
 
     def _params_buttons(self, run) -> None:
         pad = px(16)
@@ -5270,19 +5593,33 @@ class DropWindow:
         pad = px(16)
         tk.Label(self.body, text=tr(action.label), fg=FG, bg=BG, font=(FONT, 11, "bold"),
                  anchor="w").pack(fill="x", padx=pad, pady=(px(14), px(2)))
-        tk.Label(self.body, text=tr("Quality (CRF, lower = better and larger)"),
+        preset_row = tk.Frame(self.body, bg=BG)
+        preset_row.pack(fill="x", padx=pad, pady=px(8))
+        selected = tk.StringVar(value="Balanced")
+        advanced = tk.Frame(self.body, bg=BG)
+        show_advanced = tk.BooleanVar(value=False)
+        def toggle():
+            if show_advanced.get():
+                advanced.pack(fill="x", after=toggle_button)
+            else:
+                advanced.pack_forget()
+            self._fit()
+        toggle_button = ttk.Checkbutton(self.body, text=tr("Advanced settings"),
+                                        variable=show_advanced, command=toggle)
+        toggle_button.pack(fill="x", padx=pad)
+        tk.Label(advanced, text=tr("Quality (CRF, lower = better and larger)"),
                  fg=SUBTLE, bg=BG, font=(FONT, 9), anchor="w").pack(fill="x", padx=pad)
         crf_var = tk.IntVar(value=23)
-        crf_label = tk.Label(self.body, text="23", fg=ACCENT, bg=BG,
+        crf_label = tk.Label(advanced, text="23", fg=ACCENT, bg=BG,
                              font=(FONT, 14, "bold"))
         crf_label.pack(pady=(px(2), 0))
         crf_var.trace_add("write", lambda *a: crf_label.config(text=str(crf_var.get())))
-        tk.Scale(self.body, from_=18, to=32, resolution=1, orient="horizontal",
-                 variable=crf_var, showvalue=False, bg=BG, fg=FG, troughcolor=HOVER,
-                 activebackground=ACCENT_HI, highlightthickness=0, bd=0,
-                 sliderrelief="flat", length=px(260)).pack(padx=pad, pady=(0, px(4)))
+        tk.Scale(advanced, from_=18, to=32, resolution=1, orient="horizontal",
+                 variable=crf_var, showvalue=False, bg=ACCENT_HI, fg=FG,
+                 troughcolor=HOVER, activebackground=ACCENT, highlightthickness=0,
+                 bd=0, sliderrelief="flat", length=px(260)).pack(padx=pad, pady=(0, px(4)))
 
-        row = tk.Frame(self.body, bg=BG)
+        row = tk.Frame(advanced, bg=BG)
         row.pack(fill="x", padx=pad, pady=(px(2), 0))
         tk.Label(row, text=tr("Resolution"), fg=SUBTLE, bg=BG,
                  font=(FONT, 9)).pack(side="left")
@@ -5293,7 +5630,7 @@ class DropWindow:
                                width=16, font=(FONT, 9))
         res_box.pack(side="right")
 
-        target_row = tk.Frame(self.body, bg=BG)
+        target_row = tk.Frame(advanced, bg=BG)
         target_row.pack(fill="x", padx=pad, pady=(px(8), 0))
         tk.Label(target_row, text=tr("Target size (MB, optional)"), fg=SUBTLE, bg=BG,
                  font=(FONT, 9)).pack(side="left")
@@ -5305,7 +5642,7 @@ class DropWindow:
         gpu_ok = _ffmpeg_has_encoder("h264_nvenc")
         gpu_var = tk.BooleanVar(value=False)
         gpu_text = tr("Use NVIDIA GPU (NVENC)") if gpu_ok else tr("GPU encoding unavailable")
-        gpu_check = tk.Checkbutton(self.body, text=gpu_text, variable=gpu_var,
+        gpu_check = tk.Checkbutton(advanced, text=gpu_text, variable=gpu_var,
                                    fg=FG if gpu_ok else SUBTLE, bg=BG,
                                    selectcolor=HOVER, activebackground=BG,
                                    activeforeground=FG, font=(FONT, 9),
@@ -5314,7 +5651,7 @@ class DropWindow:
         if not gpu_ok:
             gpu_check.config(state="disabled")
 
-        tk.Label(self.body,
+        tk.Label(advanced,
                  text="Leave target empty to use CRF. A target size ignores CRF; "
                       "GPU encodes in one pass.",
                  fg=SUBTLE, bg=BG, font=(FONT, 8), anchor="w",
@@ -5337,6 +5674,26 @@ class DropWindow:
                 "gpu": bool(gpu_var.get()),
             })
 
+        def apply_preset(index):
+            quality, resolution = VIDEO[index]
+            crf_var.set(quality)
+            res_var.set(resolution)
+            target_var.set("")
+        for index, label in enumerate(LABELS):
+            ttk.Radiobutton(preset_row, text=tr(label), variable=selected,
+                            value=label, command=lambda i=index: apply_preset(i)).pack(fill="x")
+        apply_preset(1)
+        applying = [False]
+        original_apply = apply_preset
+        def apply_preset(index):
+            applying[0] = True
+            original_apply(index)
+            applying[0] = False
+        def custom(*args):
+            if not applying[0]:
+                selected.set("Custom")
+        for variable in (crf_var, res_var, target_var, gpu_var):
+            variable.trace_add("write", custom)
         self._params_buttons(run)
 
     def show_params(self, action: Action):
@@ -5346,17 +5703,30 @@ class DropWindow:
         pad = px(16)
         tk.Label(self.body, text=tr(action.label), fg=FG, bg=BG, font=(FONT, 11, "bold"),
                  anchor="w").pack(fill="x", padx=pad, pady=(px(14), px(2)))
-        tk.Label(self.body, text=tr(caption), fg=SUBTLE, bg=BG, font=(FONT, 9),
-                 anchor="w").pack(fill="x", padx=pad)
-        var = tk.IntVar(value=default)
-        val = tk.Label(self.body, text=f"{default}{unit}", fg=ACCENT, bg=BG,
-                       font=(FONT, 16, "bold"))
-        val.pack(pady=(px(8), 0))
-        var.trace_add("write", lambda *a: val.config(text=f"{var.get()}{unit}"))
-        tk.Scale(self.body, from_=lo, to=hi, resolution=step, orient="horizontal",
-                 variable=var, showvalue=False, bg=BG, fg=FG, troughcolor=HOVER,
-                 activebackground=ACCENT_HI, highlightthickness=0, bd=0,
-                 sliderrelief="flat", length=px(260)).pack(padx=pad, pady=px(4))
+        choices = preset_values(key, lo, hi, default)
+        parent = self.body
+        if choices:
+            selected = tk.StringVar(value="Balanced")
+            var = tk.IntVar(value=default)
+            for label, value in zip(LABELS, choices):
+                ttk.Radiobutton(self.body, text=tr(label), variable=selected,
+                                value=label, command=lambda v=value: var.set(v)).pack(fill="x", padx=pad)
+            parent = tk.Frame(self.body, bg=BG)
+            expanded = tk.BooleanVar(value=False)
+            def toggle():
+                if expanded.get():
+                    parent.pack(fill="x", after=toggle_button)
+                else:
+                    parent.pack_forget()
+                self._fit()
+            toggle_button = ttk.Checkbutton(self.body, text=tr("Advanced settings"),
+                                            variable=expanded, command=toggle)
+            toggle_button.pack(fill="x", padx=pad)
+        else:
+            var = tk.IntVar(value=default)
+        tk.Label(parent, text=tr(caption), bg=BG, fg=SUBTLE).pack(fill="x", padx=pad)
+        tk.Scale(parent, from_=lo, to=hi, resolution=step, orient="horizontal",
+                 variable=var, bg=BG, fg=FG, highlightthickness=0).pack(fill="x", padx=pad)
         self._params_buttons(lambda: self.start(action, {key: var.get()}))
 
     def show_working(self, title: str):
@@ -5563,28 +5933,144 @@ class DropWindow:
             except tk.TclError:
                 pass
 
-    def start(self, action: Action, opts: dict):
+    def start(self, action: Action, opts: dict, retry=False, prepared=False):
+        if self.busy:
+            return
+        if not retry and not prepared:
+            self.show_output_options(action, opts)
+            return
+        if not retry:
+            self._batch_action = action
+            self._batch_options = dict(opts)
+            self._batch_items = [ItemResult(Path(p), index=n) for n, p in enumerate(self.paths, 1)]
+            counts = self.app.cfg.setdefault("action_usage", {})
+            counts[identity(action)] = counts.get(identity(action), 0) + 1
+            save_config(self.app.cfg)
+        items = self._batch_items if not retry or is_combined(action) else [
+            item for item in self._batch_items if item.status == "Failed"]
         self.busy = True
         self.show_working(action.label)
+        self._show_file_results()
         q = self.app.q
-        paths = list(self.paths)
         job = self._job = JobContext(
-            lambda m: q.put(("progress", self, m)),
-            self.app.cfg,
+            lambda m: q.put(("progress", self, m)), self.app.cfg,
             lambda req: q.put(("password_request", self, req)))
-        log.info("Job start: %s (%d path(s))", action.label, len(paths))
-
         def work():
             try:
-                res = action.func(paths, opts, job)
-                q.put(("done", self, res))
-            except Cancelled:
-                q.put(("cancelled", self))
+                execute_batch(action, items, opts, job,
+                              lambda item: q.put(("file_result", self, None)), Cancelled)
+                q.put(("batch_done", self, None))
             except Exception as exc:
-                log.exception("Action failed: %s", action.label)
                 q.put(("error", self, exc))
-
         threading.Thread(target=work, name="DropFlowJob", daemon=True).start()
+
+    def _show_file_results(self):
+        results_frame = ttk.Frame(self.body)
+        results_frame.pack(fill="x", padx=px(16), pady=px(8))
+        self._result_tree = ttk.Treeview(results_frame, columns=("file", "status", "output"),
+                                        show="headings", height=5)
+        self._result_tree.heading("file", text=tr("File"))
+        self._result_tree.heading("status", text=tr("Status"))
+        self._result_tree.heading("output", text=tr("Output"))
+        self._result_tree.column("output", width=px(120), stretch=True)
+        self._result_tree.column("file", width=px(130), stretch=True)
+        self._result_tree.column("status", width=px(90), stretch=False)
+        scrollbar = ttk.Scrollbar(results_frame, orient="vertical", command=self._result_tree.yview)
+        self._result_tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self._result_tree.pack(fill="both", expand=True)
+        self._result_tree.tag_configure("Done", foreground=GREEN)
+        self._result_tree.tag_configure("Failed", foreground=RED)
+        self._result_details = tk.Text(self.body, height=3, width=36, wrap="word",
+                                       bg=SURFACE, fg=FG, relief="flat", font=(FONT, 9), padx=12, pady=10)
+        self._result_details.pack(fill="x", padx=px(12))
+        self._selected_output = tk.StringVar()
+        self._output_choice = ttk.Combobox(self.body, textvariable=self._selected_output, state="readonly")
+        self._output_choice.pack(fill="x", padx=px(12), pady=px(4))
+        output_buttons = ttk.Frame(self.body)
+        output_buttons.pack(fill="x", padx=px(12), pady=px(3))
+        self._output_buttons = []
+        for label, mode in (("Open file", "open"), ("Open folder", "folder"), ("Copy path", "copy")):
+            button = ttk.Button(output_buttons, text=tr(label), command=lambda m=mode: self._selected_output_action(m),
+                                style="Primary.TButton" if mode == "open" else "Ghost.TButton")
+            button.pack(side="left", expand=True, fill="x", padx=2)
+            self._output_buttons.append(button)
+        self._result_tree.bind("<<TreeviewSelect>>", self._select_file_result)
+        self._refresh_file_results()
+        self._bind_dnd_tree()
+        self._fit()
+
+    def _refresh_file_results(self):
+        tree = getattr(self, "_result_tree", None)
+        if tree is None or not tree.winfo_exists():
+            return
+        for index, item in enumerate(self._batch_items):
+            values = (item.source.name, tr(item.status), str(item.outputs[0]) if item.outputs else item.error)
+            if tree.exists(str(index)):
+                tree.item(str(index), values=values, tags=(item.status,))
+            else:
+                tree.insert("", "end", iid=str(index), values=values, tags=(item.status,))
+        if not tree.selection() and self._batch_items:
+            tree.selection_set("0")
+        self._select_file_result()
+
+    def _select_file_result(self, event=None):
+        selected = self._result_tree.selection()
+        if not selected:
+            return
+        item = self._batch_items[int(selected[0])]
+        text = str(item.source) + "\n" + (item.error or "\n".join(map(str, item.outputs))
+                                            or item.preview or tr(item.status))
+        self._result_details.configure(state="normal")
+        self._result_details.delete("1.0", "end")
+        self._result_details.insert("1.0", text)
+        self._result_details.configure(state="disabled")
+        outputs = [str(p) for p in item.outputs]
+        self._output_choice.configure(values=outputs)
+        for button in self._output_buttons:
+            button.configure(state="normal" if outputs else "disabled")
+        if self._selected_output.get() not in outputs:
+            self._selected_output.set(outputs[0] if outputs else "")
+
+    def _selected_output_action(self, mode):
+        selected = self._selected_output.get()
+        if not selected:
+            return
+        path = Path(selected)
+        if mode == "copy":
+            self.app.root.clipboard_clear()
+            self.app.root.clipboard_append(selected)
+        elif mode == "folder":
+            reveal(path)
+        else:
+            open_path(path)
+
+    def _batch_finished(self):
+        self.busy = False
+        self._job = None
+        self._clear()
+        self.state = "done"
+        failed = sum(i.status == "Failed" for i in self._batch_items)
+        done = sum(i.status in ("Done", "Unchanged") for i in self._batch_items)
+        ttk.Label(self.body, text=tr("Conversion complete"), style="Heading.TLabel").pack(anchor="w", padx=px(16), pady=(px(18), px(5)))
+        ttk.Label(self.body, text=f"{tr('Done')}: {done}  ·  {tr('Failed')}: {failed}",
+                  style="Muted.TLabel").pack(anchor="w", padx=px(16), pady=(0, px(6)))
+        self._show_file_results()
+        if failed:
+            label = "Retry combined job" if is_combined(self._batch_action) else "Retry failed files"
+            ttk.Button(self.body, text=tr(label), command=lambda: self.start(
+                self._batch_action, self._batch_options, retry=True), style="Primary.TButton").pack(fill="x", padx=px(16), pady=px(8))
+        outputs = list(dict.fromkeys(p for item in self._batch_items for p in item.outputs))
+        if outputs:
+            self._button(self.body, "Open folder", lambda: reveal(Path(outputs[0]))).pack(fill="x", padx=px(12))
+        texts = [item.clipboard for item in self._batch_items if item.clipboard]
+        if texts:
+            def copy():
+                self.app.root.clipboard_clear()
+                self.app.root.clipboard_append("\n".join(texts))
+            self._button(self.body, "Copy text", copy).pack(fill="x", padx=px(12))
+        ttk.Button(self.body, text=tr("Close"), command=self.close, style="Ghost.TButton").pack(fill="x", padx=px(16), pady=px(10))
+        self._fit()
 
     def on_progress(self, text: str):
         if self.status is not None:
@@ -5787,6 +6273,7 @@ class AppearanceWindow:
 
     def __init__(self, app: "App"):
         self.app = app
+        configure_ttk(app.root)
         self.alive = True
         self.pending_theme = str(app.cfg.get("theme", "midnight"))
         self.pending_accent = str(app.cfg.get("accent", ""))
@@ -5858,6 +6345,7 @@ class AppearanceWindow:
         t.geometry(f"+{max(8, (sw - w) // 2)}+{max(8, (sh - h) // 2)}")
         dark_titlebar(t)
         round_window(t)
+        apply_window_glass(t)
         self._refresh_status()
 
     def _btn(self, parent, text, command, primary=False):
@@ -5986,6 +6474,7 @@ class AppearanceWindow:
 class SettingsWindow:
     def __init__(self, app: "App"):
         self.app = app
+        configure_ttk(app.root)
         self.alive, self.recording = True, False
         self.pending = app.cfg["hotkey"]
         t = self.top = tk.Toplevel(app.root)
@@ -6120,6 +6609,7 @@ class SettingsWindow:
         t.geometry(f"+{x}+{y}")
         dark_titlebar(t)
         round_window(t)
+        apply_window_glass(t)
         self._update_active()
         t.after(30, self._refresh_tools)
         t.after(80, lambda: force_foreground(t, alt_trick=False))
@@ -6379,15 +6869,9 @@ class App:
         self.root.report_callback_exception = lambda *a: log.error("Tk callback error",
                                                                   exc_info=a)
         apply_ui_scale(self.root, primary_dpi() / 96.0)
+        choose_ui_font(self.root)
 
-        style = ttk.Style(self.root)
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass
-        style.configure("DF.Horizontal.TProgressbar", troughcolor=HOVER, background=ACCENT,
-                        bordercolor=BG, lightcolor=ACCENT, darkcolor=ACCENT,
-                        thickness=px(6))
+        configure_ttk(self.root)
 
         self.icon = pystray.Icon(APP_NAME, make_tray_image(), APP_NAME,
                                  self._tray_menu())
@@ -6429,11 +6913,14 @@ class App:
         self.cfg["accent"] = appearance.normalize_hex(accent, "") if appearance and accent else ""
         self.cfg["reduce_motion"] = bool(reduce_motion)
         save_config(self.cfg)
+        configure_ttk(self.root)
         try:
-            style = ttk.Style(self.root)
-            style.configure("DF.Horizontal.TProgressbar", troughcolor=HOVER,
-                            background=ACCENT, bordercolor=BG, lightcolor=ACCENT,
-                            darkcolor=ACCENT, thickness=px(6))
+            if self.win is not None:
+                self.win.refresh_glass()
+            if self.settings is not None:
+                apply_window_glass(self.settings.top)
+            if self.appearance is not None:
+                apply_window_glass(self.appearance.top)
         except Exception:
             pass
         try:
@@ -6716,6 +7203,13 @@ class App:
                 self._refresh_tray()
                 self.notify(f"DropFlow {info.version} is available. "
                             f"Open the tray menu to update.")
+        elif kind in ("file_result", "batch_done"):
+            win = msg[1]
+            if win.alive and not win.closing:
+                if kind == "batch_done":
+                    win._batch_finished()
+                else:
+                    win._refresh_file_results()
         elif kind == "progress":
             if msg[1].alive:
                 msg[1].on_progress(msg[2])
@@ -6774,6 +7268,7 @@ class App:
                 pass
             return
         apply_ui_scale(self.root, primary_dpi() / 96.0)
+        choose_ui_font(self.root)
         self.settings = SettingsWindow(self)
 
     def _open_appearance(self):
@@ -6893,6 +7388,10 @@ def _selftest() -> int:
         except Exception as exc:
             item("Pillow JPEG/PNG", False, repr(exc))
 
+        item("HEIC/HEIF images disabled", not ({".heic", ".heif"} & IMG_EXTS) and "HEIC" not in _SAME_FORMAT)
+        if getattr(sys, "frozen", False):
+            item("Image HEIF dependency excluded", importlib.util.find_spec("pillow_heif") is None)
+
         # Tk + tkdnd (the files that are trickiest to bundle).
         try:
             root = TkinterDnD.Tk()
@@ -6930,6 +7429,20 @@ def _selftest() -> int:
             item("PDF -> PNG", count == 1, f"pages={count}")
         except Exception as exc:
             item("PDF -> PNG", False, repr(exc))
+
+        try:
+            from output_policy import output_scope
+            from saved_presets import save_preset
+            with output_scope([pdf], {"folder": str(tmp / "routed"), "pattern": "{name}_ready"}, "pdf"):
+                organized = derive_output(pdf, ".pdf")
+                export_pages([{"source": str(pdf), "number": 0, "rotation": 90}], organized, [pdf], ctx)
+            with fitz.open(organized) as check:
+                item("PDF organizer + output routing", check.page_count == 1 and check[0].rotation == 90
+                     and organized.parent == tmp / "routed")
+            presets = save_preset([], "pdf", "Selftest", {"dpi": 150}, {"pattern": "{name}_ready"})
+            item("Saved presets", load_presets(presets)[0]["options"]["dpi"] == 150)
+        except Exception as exc:
+            item("New workflow features", False, repr(exc))
 
         try:
             from docx import Document
@@ -7011,6 +7524,18 @@ def _selftest() -> int:
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

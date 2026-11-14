@@ -9,7 +9,8 @@ except ImportError:  # pragma: no cover
     winreg = None
 
 THEME_ORDER = ["system", "midnight", "slate", "ocean", "forest",
-               "rose", "sepia", "light", "high_contrast"]
+               "rose", "sepia", "light", "high_contrast", "glass",
+               "windows_glass", "win11_glass"]
 
 THEME_LABELS = {
     "system": "System (Auto)",
@@ -21,12 +22,15 @@ THEME_LABELS = {
     "sepia": "Sepia",
     "light": "Light",
     "high_contrast": "High Contrast",
+    "glass": "Acrylic Glass",
+    "windows_glass": "Windows Glass",
+    "win11_glass": "Windows 11 Glass",
 }
 
 THEMES = {
     "midnight": dict(
-        bg="#181825", fg="#cdd6f4", accent="#cba6f7", accent_hi="#e2cffb",
-        surface="#1f1f31", hover="#313244", subtle="#7f849c",
+        bg="#11131c", fg="#eef0f7", accent="#b5a0ff", accent_hi="#d2c4ff",
+        surface="#1b1e2b", hover="#30364a", subtle="#a1a9be",
         green="#a6e3a1", red="#f38ba8"),
     "slate": dict(
         bg="#111827", fg="#e5e7eb", accent="#38bdf8", accent_hi="#7dd3fc",
@@ -49,13 +53,28 @@ THEMES = {
         surface="#f8efdf", hover="#e2d3bb", subtle="#6f5a49",
         green="#2f7d4f", red="#a63a32"),
     "light": dict(
-        bg="#f4f6fb", fg="#1e2530", accent="#2563eb", accent_hi="#3b82f6",
-        surface="#ffffff", hover="#e7edf6", subtle="#5d6b7d",
+        bg="#f3f5fa", fg="#182237", accent="#5944d6", accent_hi="#705ce3",
+        surface="#ffffff", hover="#dce3f0", subtle="#59677d",
         green="#15803d", red="#b91c1c"),
     "high_contrast": dict(
         bg="#000000", fg="#ffffff", accent="#ffff00", accent_hi="#ffff99",
         surface="#111111", hover="#333333", subtle="#d0d0d0",
         green="#00ff66", red="#ff5555"),
+    "glass": dict(
+        bg="#151321", fg="#f1f2ff", accent="#9cc7ff", accent_hi="#c8e3ff",
+        surface="#211d33", hover="#302a49", subtle="#a9a5c7",
+        green="#7ee2b8", red="#ff9aa9", alpha=0.97,
+        glass_tint=(21, 19, 33)),
+    "windows_glass": dict(
+        bg="#27302a", fg="#f2f5f1", accent="#5b9cff", accent_hi="#8ab8ff",
+        surface="#303b33", hover="#3d4b41", subtle="#b3bdb2",
+        green="#8ed081", red="#ff9292", alpha=0.94,
+        glass_tint=(39, 49, 43)),
+    "win11_glass": dict(
+        bg="#1e1e1e", fg="#ffffff", accent="#60a5fa", accent_hi="#93c5fd",
+        surface="#2a2a2a", hover="#343434", subtle="#a0a0a0",
+        green="#8ed081", red="#ff9292", alpha=0.94,
+        glass_tint=(30, 30, 30), radius=8, backdrop=3),
 }
 
 
@@ -105,6 +124,7 @@ def resolve_theme(name: str, accent: str | None = None) -> tuple[str, dict]:
     if chosen == "system":
         chosen = "light" if system_prefers_light() else "midnight"
     tokens = dict(THEMES[chosen])
+    tokens.setdefault("alpha", 1.0)
     if accent:
         tokens["accent"] = normalize_hex(accent, tokens["accent"])
         tokens["accent_hi"] = lighten(tokens["accent"], 0.22)
@@ -192,3 +212,4 @@ def _mix(a: str, b: str, amount: float) -> str:
     return _hex(int(ar + (br - ar) * amount),
                 int(ag + (bg_ - ag) * amount),
                 int(ab + (bb - ab) * amount))
+

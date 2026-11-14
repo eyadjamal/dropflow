@@ -1,112 +1,95 @@
 # DropFlow
-Version 3.2.0
+
+**Version 3.3.0** · Windows 10/11 x64 · Python 3.12
 
 ### Drop it. Convert it. Done.
-![DropFlow](DropFlow-3.2.0.png)
 
-DropFlow is a local, drag-and-drop Windows file toolbox for PDFs, Office
-files, images, archives, video, and audio. Drop files onto the window, pick a
-task, and the result is created beside the original file.
+A local Windows tray utility for PDF, Office, image, archive, video and audio tasks. Drop files, choose an action, review the destination, and convert. No account, uploads or telemetry.
 
-No cloud. No telemetry. No account required.
+[![Tests](https://github.com/eyadjamal/dropflow/actions/workflows/tests.yml/badge.svg)](https://github.com/eyadjamal/dropflow/actions/workflows/tests.yml)
+[Download source ZIP](https://github.com/eyadjamal/dropflow/archive/refs/heads/main.zip) · [Published Windows releases](https://github.com/eyadjamal/dropflow/releases)
 
-[![Download for Windows](https://img.shields.io/badge/Download-Windows-2ea44f?style=for-the-badge)](https://github.com/eyadjamal/dropflow/releases/latest/download/DropFlow-Setup.exe)
+This branch contains **3.3.0** source and build configuration. Existing release downloads retain the version in their release title; updating the branch does not replace older release assets.
 
-![tests](https://github.com/eyadjamal/dropflow/actions/workflows/tests.yml/badge.svg)
+## What's new in 3.3.0
 
-## Features
+- **Smarter menu:** applicable favorites and three frequently used actions first; other actions grouped under Convert, PDF Tools, Extract and Archive. Search reveals matching groups.
+- **Quality presets:** Small file, Balanced and Best quality, with advanced parameters available separately.
+- **Per-file results:** live status, output paths, readable failures and Retry failed files. Combined operations retry the complete ordered job.
+- **Saved presets:** named conversion settings, destination folders and filename patterns. Load from the menu; update or delete from output review.
+- **Output controls:** destination selection, filename preview using `{name}`, `{action}`, `{index}` and `{date}`, numbered collision protection, and per-result Open file, Open folder and Copy path.
+- **Visual PDF organizer:** drag thumbnails to reorder, rotate/delete pages, add PDFs, undo and preview. Saves a new document and preserves the originals.
+- **Refreshed appearance/UI:** refined Midnight and Light themes, readable typography, consistent cards and controls, clear primary actions, numbered page cards, rotation badges and keyboard-aware scrolling.
+- **English and Arabic:** translated controls and RTL form labels; display scaling checked at 100–150%.
+- **Maintainability:** separate modules for menu ranking, quality presets, jobs, presets, output policy, output review, PDF models, organizer UI and styling.
+- **HEIC/HEIF image support removed:** no conversion actions, codec imports or pillow-heif packaging dependency. Supported image conversion targets are PNG, JPG and WebP.
 
-### Conversion
-- PDF merge, compress, split, page ranges, export, OCR, searchable PDFs
-- PowerPoint `.pptx` / `.ppt` → PDF, PNG/JPG slides, TXT
-- Excel `.xlsx` / `.xls` → PDF, CSV, HTML, JSON, TXT
-- TXT → PDF, DOCX, PPTX, XLSX
-- Images/PDF → PowerPoint
-- CSV/JSON/PDF → Excel workbook
-- ZIP/RAR extraction with password prompts
-- Universal Media Converter
-- Video compression and audio extraction
+## Screenshots
 
-### Interface
-- Draggable floating window with remembered position
-- 9 themes: System, Midnight, Slate, Ocean, Forest, Rose, Sepia, Light, High Contrast
-- Custom accent color with contrast guard
-- Reduce Motion
-- Arabic and English interface with RTL alignment
-- Searchable actions and favorites
-- Image/PDF thumbnails
-- Before/after result card
-- Batch progress with recent activity
-- Classic Explorer context menu
+These screenshots use sample documents.
 
-### Privacy
-- Fully local processing
-- No uploads
-- No telemetry
-- Optional update checker only
+### Action menu
+![Action menu](screenshots/3.3.0/action-menu.png)
 
-## Download and run
+### Presets and output review
+![Output controls](screenshots/3.3.0/output-review.png)
 
-1. Download **`DropFlow-Setup.exe`** from the latest release.
-2. Run the installer and follow the wizard.
-3. Run **`DropFlow.exe`**.
-4. Keep `DropFlow.exe` and the `_internal` folder together.
+### PDF organizer — dark
+![PDF organizer dark](screenshots/3.3.0/pdf-organizer-dark.png)
 
-Python is **not** required.
+### PDF organizer — light
+![PDF organizer light](screenshots/3.3.0/pdf-organizer-light.png)
 
-### Direct download
+## Conversion tools
 
-[Download DropFlow for Windows](https://github.com/eyadjamal/dropflow/releases/latest/download/DropFlow-Setup.exe)
+| Input | Tasks |
+| --- | --- |
+| PDF | Organize, merge, compress, split, extract ranges, export pages, OCR/searchable PDF and text |
+| Images | PNG/JPG/WebP conversion, compression, PDF creation, OCR and animated GIF from multiple images |
+| Word, PowerPoint, Excel | PDF, slide images, text and supported data/document conversions |
+| TXT, CSV, JSON | Supported PDF/document/spreadsheet conversions |
+| Video/audio | Media conversion, compression and audio extraction through FFmpeg |
+| ZIP/RAR, files/folders | ZIP creation and supported archive extraction, including password prompts |
 
-### Portable version
+Image inputs: PNG, JPG/JPEG, WebP, BMP, TIFF and GIF. HEIC/HEIF image files are unsupported. Archiving arbitrary files is separate from image conversion. Optional helpers affect operation availability and layout fidelity.
 
-[Download DropFlow-Windows.zip](https://github.com/eyadjamal/dropflow/releases/latest/download/DropFlow-Windows.zip)
+## Run from source
 
-## ⚠️ SmartScreen warning
+```powershell
+python -m pip install -r requirements.txt
+python DropFlow.pyw --console
+```
 
-This build is **not code-signed**, so Windows may display:
+Use 64-bit Python 3.12 on Windows and keep the Python modules together. Configuration, presets and logs are stored in `%APPDATA%\DropFlow`.
 
-> Windows protected your PC
+## Windows builds
 
-This is expected for an unsigned independent application. Click:
+Use the setup supplied for the desired release, or extract the entire portable ZIP and run `DropFlow.exe`. Python is bundled; keep `_internal` beside the executable. Quit an older running instance before installing. Current builds are unsigned.
 
-**More info → Run anyway**
+The public setup installs per user and provides the classic Explorer **Send to DropFlow** entry. The separate development-only modern context-menu package is not included in that public build.
 
-DropFlow runs entirely on your machine.
+## Optional helpers
 
-## Optional tools
+- **LibreOffice:** preferred Office-to-PDF/slide rendering and legacy Office files. Microsoft Office COM is a fallback with installed Office and pywin32.
+- **Tesseract:** OCR; install the English/Arabic language data you need.
+- **7-Zip or UnRAR:** RAR and supported encrypted archive cases.
+- **FFmpeg:** bundled through imageio-ffmpeg. Its video/audio codecs are independent of the removed image support.
 
-DropFlow detects these automatically:
+## PDF organizer
 
-- **LibreOffice** — best-quality Office → PDF and legacy `.ppt`/`.xls`
-- **Tesseract** — OCR and image → text
-- **UnRAR or 7-Zip** — RAR extraction
+Drop PDFs and choose **Organize PDF pages**. Drag cards, use the editing toolbar and select a page for a larger preview. Large documents show 24 thumbnails per group; Move left/right can cross groups. Undo keeps the last 50 changes. Save PDF opens output review. Unlock password-protected PDFs first. Rebuilding selected pages does not preserve document-level bookmarks/forms as a complete original document structure.
 
-Without LibreOffice, text/CSV/JSON/HTML conversions still work, but
-PowerPoint/Excel → PDF may have reduced layout fidelity.
+## Development
 
-## Privacy
+```powershell
+python -m unittest discover -s tests -v
+python DropFlow.pyw --selftest --console
+```
 
-Everything runs locally. There is no upload, telemetry, or account requirement.
+See [DEVELOPMENT.md](DEVELOPMENT.md), [ARCHITECTURE.md](ARCHITECTURE.md), [DESIGN.md](DESIGN.md) and [CHANGELOG.md](CHANGELOG.md). Windows CI installs requirements, compiles the source and runs tests.
 
-## Requirements
+## Privacy and license
 
-- Windows 10/11 64-bit
-- Python is not required for the installer
-- Optional: LibreOffice, Tesseract, UnRAR/7-Zip
+Conversions run locally. The optional update checker contacts the GitHub releases API. No document upload, telemetry or account is required.
 
-## License
-
-GNU Affero General Public License v3.0 — see [LICENSE](LICENSE).
-
-## Source layout
-
-```text
-DropFlow.pyw
-appearance.py
-i18n.py
-app_update.py
-media_converter.py
-office_converter.py
-tests/
-.github/workflows/tests.yml
+Source is licensed under [AGPL-3.0](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.txt).

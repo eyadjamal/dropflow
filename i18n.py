@@ -1,4 +1,4 @@
-﻿"""Small localization layer for DropFlow (English/Arabic)."""
+"""Small localization layer for DropFlow (English/Arabic)."""
 from __future__ import annotations
 
 import re
@@ -21,6 +21,88 @@ def is_rtl() -> bool:
 
 
 AR = {
+    "HEIC/HEIF images are not supported.": "صور HEIC/HEIF غير مدعومة.",
+    'READY TO CONVERT': 'جاهز للتحويل',
+    'Choose where your files go.': 'اختر مكان حفظ ملفاتك.',
+    'Conversion settings': 'إعدادات التحويل',
+    'Save destination': 'وجهة الحفظ',
+    'Blank uses automatic naming. Existing files stay safe.': 'اتركه فارغًا للتسمية التلقائية. لن تُستبدل الملفات الموجودة.',
+    'Output preview': 'معاينة الإخراج',
+    'Save a preset': 'حفظ إعداد مسبق',
+    'Save these settings for next time': 'احفظ هذه الإعدادات للمرة القادمة',
+    'Convert files': 'تحويل الملفات',
+    'Choose what to do with your files': 'اختر ما تريد فعله بملفاتك',
+    'Local tools. Ready when you are.': 'أدوات محلية جاهزة عند حاجتك.',
+    'Conversion complete': 'اكتمل التحويل',
+    'DROPFLOW / PDF WORKSPACE': 'DROPFLOW / مساحة عمل PDF',
+    'Create a new PDF. Your originals stay unchanged.': 'أنشئ ملف PDF جديدًا مع الاحتفاظ بالملفات الأصلية.',
+    '← Move': '← تحريك',
+    'Move →': 'تحريك →',
+    'Save PDF': 'حفظ PDF',
+    'Drag to reorder · Select to edit · Ctrl+Z to undo': 'اسحب للترتيب · حدد للتعديل · Ctrl+Z للتراجع',
+    'Source page': 'صفحة المصدر',
+    'Resolution': 'الدقة',
+    'Format': 'الصيغة',
+    'Frame duration': 'مدة الإطار',
+    'Target size': 'الحجم المستهدف',
+    'GPU encoding': 'ترميز بالمعالج الرسومي',
+    'Pages': 'الصفحات',
+
+    'Organize PDF pages…': 'تنظيم صفحات PDF…',
+    'Organize PDF pages': 'تنظيم صفحات PDF',
+    'Saved presets': 'الإعدادات المحفوظة',
+    'Saved preset': 'إعداد محفوظ',
+    'Output folder': 'مجلد الإخراج',
+    'Browse…': 'استعراض…',
+    'Use source folder': 'استخدام مجلد المصدر',
+    'Filename pattern (without extension)': 'نمط اسم الملف (دون الامتداد)',
+    'Leave blank for automatic naming. Existing files are never replaced.': 'اتركه فارغًا للتسمية التلقائية. لن يتم استبدال الملفات الموجودة.',
+    'Preset name': 'اسم الإعداد',
+    'Save preset': 'حفظ الإعداد',
+    'Preset saved': 'تم حفظ الإعداد',
+    'Preset deleted': 'تم حذف الإعداد',
+    'Delete': 'حذف',
+    'Default settings': 'الإعدادات الافتراضية',
+    'Automatic filename': 'اسم تلقائي',
+    'Name preview': 'معاينة الاسم',
+    'The conversion adds the correct extension.': 'يُضاف الامتداد الصحيح أثناء التحويل.',
+    'Choose an absolute output folder.': 'اختر مسارًا مطلقًا لمجلد الإخراج.',
+    'The output folder is not a directory.': 'مسار الإخراج ليس مجلدًا.',
+    'Open file': 'فتح الملف',
+    'Copy path': 'نسخ المسار',
+    'Add PDFs…': 'إضافة ملفات PDF…',
+    'Move left': 'تحريك لليسار',
+    'Move right': 'تحريك لليمين',
+    'Rotate left': 'تدوير لليسار',
+    'Rotate right': 'تدوير لليمين',
+    'Delete page': 'حذف الصفحة',
+    'Undo': 'تراجع',
+    'Selected page preview': 'معاينة الصفحة المحددة',
+    'Previous': 'السابق',
+    'Next': 'التالي',
+    'Save organized PDF…': 'حفظ PDF المنظم…',
+    'Drag pages to reorder. Select a page to rotate or delete. Undo restores your last change.': 'اسحب الصفحات لترتيبها. حدد صفحة لتدويرها أو حذفها. استخدم التراجع لاستعادة آخر تغيير.',
+    'Loading…': 'جارٍ التحميل…',
+    'Page': 'الصفحة',
+    'pages': 'صفحات',
+    'No pages selected': 'لم يتم تحديد صفحات',
+    'Keep at least one page before saving.': 'احتفظ بصفحة واحدة على الأقل قبل الحفظ.',
+    'quality': 'الجودة',
+    'resolution': 'الدقة',
+    'target_mb': 'الحجم بالميغابايت',
+    'gpu': 'المعالج الرسومي',
+    'dpi': 'دقة الطباعة',
+    'format': 'الصيغة',
+    'target': 'الصيغة',
+    'duration': 'المدة',
+
+    "Favorites": "المفضلة", "Frequently used": "الأكثر استخدامًا",
+    "Convert": "تحويل", "PDF Tools": "أدوات PDF", "Extract": "استخراج", "Archive": "أرشيف",
+    "Small file": "ملف صغير", "Balanced": "متوازن", "Best quality": "أفضل جودة",
+    "Advanced settings": "إعدادات متقدمة", "File": "الملف", "Status": "الحالة",
+    "Queued": "في الانتظار", "Running": "جارٍ التنفيذ", "Failed": "فشل",
+    "Unchanged": "دون تغيير", "Retry failed files": "إعادة محاولة الملفات الفاشلة",
+    "Retry combined job": "إعادة محاولة العملية المجمعة",
     "Drop files or folders here": "اسحب الملفات أو المجلدات هنا",
     "Ctrl + Shift + D toggles · Esc closes": "Ctrl + Shift + D للفتح · Esc للإغلاق",
     "PDF · images · Word · video · ZIP": "PDF · صور · Word · فيديو · ZIP",
@@ -187,6 +269,10 @@ AR = {
     "Sepia": "سيبيا",
     "Light": "فاتح",
     "High Contrast": "تباين عالٍ",
+    "Acrylic Glass": "زجاج أكريليك",
+    "Windows Glass": "زجاج ويندوز",
+    "Windows 11 Glass": "زجاج ويندوز 11",
+    "Transparent / Acrylic Glass": "شفاف / زجاج أكريليك",
     "LibreOffice — ready (best Office → PDF)": "LibreOffice — جاهز (الأفضل لتحويل Office إلى PDF)",
     "LibreOffice — not found (using the built-in DOCX renderer)":
         "LibreOffice — غير موجود (سيُستخدم محرك DOCX الداخلي)",
@@ -219,4 +305,8 @@ def tr(text: str) -> str:
         if pattern.match(text):
             return pattern.sub(replacement, text)
     return text
+
+
+
+
 

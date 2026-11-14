@@ -1,108 +1,30 @@
-﻿# DropFlow source bundle
+# Developing DropFlow 3.3.0
 
-Files
------
-- `DropFlow.pyw`       Tkinter/tray application and all actions.
-- `media_converter.py` Universal video/audio/GIF converter.
-- `office_converter.py` PowerPoint/Excel/Word/text/data converter.
+Use Windows x64 and Python 3.12. Keep the Python modules together.
 
-The two converter modules are imported by DropFlow and are also usable on their
-own.  Keep all three files in the same folder.
+```powershell
+python -m pip install -r requirements.txt
+python -m pip install pyinstaller pywin32
+python -m unittest discover -s tests -v
+python DropFlow.pyw --selftest --console
+```
 
-Quick start
------------
-1. Install Python 3.10+ (64-bit) and run:
-       pip install -r requirements.txt
-2. Install LibreOffice for high-fidelity Office -> PDF conversion:
-       https://www.libreoffice.org/download/
-3. Install Tesseract for OCR/image text extraction (optional):
-       https://github.com/UB-Mannheim/tesseract/wiki
-4. Run:
-       python DropFlow.pyw --console
-   or double-click DropFlow.pyw.
+Install Inno Setup 6, then run `./build.ps1 -Python python` in PowerShell. The committed spec collects the conversion libraries and explicitly excludes pillow_heif and _pillow_heif. Confirm those codecs are absent from the built distribution.
 
-Optional external tools:
-- LibreOffice: Office/PowerPoint/Excel -> PDF and legacy .ppt/.xls support.
-- Tesseract: OCR and image -> TXT.
-- UnRAR or 7-Zip: RAR extraction.
-- FFmpeg: bundled through imageio-ffmpeg, or use FFMPEG_PATH/PATH.
+The public installer is `shell/installer/DropFlow-Setup-Classic.iss`; it packages `dist330/DropFlow`, installs per user and registers the classic Explorer menu. The modern-menu package is development-only and not bundled in the public setup. Current builds are unsigned. Preserve LICENSE, package metadata and notices when distributing.
 
-Conversion matrix
------------------
-PowerPoint .pptx/.ppt:
-  -> PDF
-  -> PNG or JPG images, one per slide
-  -> TXT (slide text and tables)
+## Modules
 
-Excel .xlsx/.xls:
-  -> PDF
-  -> CSV (one file per sheet)
-  -> HTML
-  -> JSON (one array per sheet, first row as headers)
-  -> TXT (tab-separated sheet content)
+- DropFlow.pyw: composition, Windows/tray integration, existing screens and conversion handlers.
+- action_menu.py / quality_presets.py: menu and quality behavior.
+- batch_jobs.py: per-file/combined execution and cancellation.
+- saved_presets.py / output_policy.py: named settings and scoped output paths.
+- output_panel.py / ui_theme.py: output review and shared ttk styling.
+- pdf_organizer.py / pdf_organizer_ui.py: page model/export and background-rendered thumbnails.
+- office_converter.py / media_converter.py: conversion engines.
+- appearance.py / i18n.py / app_update.py: themes, translations and update checks.
+- tests/: unit/integration checks.
 
-Text .txt:
-  -> PDF (reportlab)
-  -> DOCX (python-docx)
-  -> PPTX (split into slides)
-  -> XLSX (one row per line, detects tab/comma-separated data)
+ARCHITECTURE.md describes remaining extraction work; DESIGN.md describes the UI contract.
 
-Other directions:
-  images / PDF        -> PPTX (one slide per image/PDF page)
-  CSV / JSON / PDF    -> XLSX (PDF tables become sheets; text falls back to rows)
-  PDF / DOCX / PPTX / XLSX / CSV / JSON / images -> TXT
-
-Office -> PDF strategy
-----------------------
-1. LibreOffice headless with an isolated user profile.
-2. Microsoft Office COM automation if `pywin32` and Office are installed.
-3. Excel/DOCX basic reportlab fallbacks if neither is available.
-PowerPoint -> PDF genuinely needs LibreOffice or PowerPoint COM.
-
-Python integration
--------------------
-    from office_converter import OfficeConverter, OfficeCallbacks
-
-    conv = OfficeConverter(soffice_path=r"C:\Program Files\LibreOffice\program\soffice.exe")
-    result = conv.convert(
-        "deck.pptx", "png", "deck_slides",
-        callbacks=OfficeCallbacks(
-            on_start=lambda src, target: print("start", src, target),
-            on_progress=lambda pct, msg: print(pct, msg),
-            on_success=lambda res: print("done", [str(p) for p in res.outputs]),
-            on_error=lambda exc: print("failed", exc),
-        ),
-    )
-
-Async:
-
-    handle = conv.convert_async("book.xlsx", "json", "book.json")
-    handle.join()
-
-Combining multiple images/PDF pages into one PowerPoint:
-
-    conv.to_pptx_many(["one.png", "two.pdf"], "output.pptx")
-
-DropFlow integration
---------------------
-`DropFlow.pyw` imports the modules optionally.  If a module is missing the
-feature shows a clear error instead of crashing.  The relevant UI actions are
-created in `build_actions()` and dispatched through `JobContext`, which supplies
-progress, cancellation, and per-file fault tolerance.
-
-Packaging notes
----------------
-When rebuilding with PyInstaller, include:
-  --hidden-import office_converter
-  --hidden-import media_converter
-  --collect-all pptx
-  --collect-all openpyxl
-  --collect-all docx
-  --collect-all reportlab
-  --collect-all pymupdf
-  --collect-all fitz
-  --collect-all tkinterdnd2
-  --collect-all imageio_ffmpeg
-
-LibreOffice, Tesseract, UnRAR/7-Zip and Microsoft Office are external tools and
-are not bundled.  FFmpeg is bundled by the current build.
+Optional Office/OCR/archive helpers remain external. Automated tests cover presets, output naming, collisions, PDF ordering/rotation/undo, cancellation, removed image formats, IPC and existing settings/converter behavior. Native Tk smoke checks cover real conversion/retry, dark/light, Arabic, keyboard navigation and scaling. Office fidelity depends on the available engine.

@@ -22,7 +22,15 @@ spec.loader.exec_module(df)
 
 class CoreTests(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(df.APP_VERSION, "3.2.0")
+        self.assertEqual(df.APP_VERSION, "3.3.0")
+
+    def test_action_usage_persists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(df, "CONFIG_PATH", Path(tmp) / "config.json"):
+                cfg = df.load_config()
+                cfg["action_usage"] = {"act_compress_pdfs": 7}
+                df.save_config(cfg)
+                self.assertEqual(df.load_config()["action_usage"], {"act_compress_pdfs": 7})
 
     def test_fmt_size(self):
         self.assertIn("KB", df.fmt_size(2048))
@@ -60,3 +68,4 @@ class CoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

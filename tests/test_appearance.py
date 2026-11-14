@@ -1,4 +1,4 @@
-﻿"""Appearance token tests."""
+"""Appearance token tests."""
 import sys
 import unittest
 from pathlib import Path
@@ -24,6 +24,12 @@ class AppearanceTests(unittest.TestCase):
         color, ratio = appearance.safe_accent("#111111", "#181825")
         self.assertGreaterEqual(ratio, 4.5)
         self.assertNotEqual(color, "#111111")
+
+    def test_primary_button_text_contrast(self):
+        from ui_theme import primary_text
+        for name in appearance.THEMES:
+            _, colors = appearance.resolve_theme(name)
+            self.assertGreaterEqual(appearance.contrast_ratio(primary_text(colors["accent"]), colors["accent"]), 4.5)
 
     def test_normalize(self):
         self.assertEqual(appearance.normalize_hex("ABC", "#000000"), "#aabbcc")
