@@ -3,10 +3,10 @@
 ; Build with Inno Setup 6: ISCC.exe DropFlow-Setup-Classic.iss
 
 #define AppName "DropFlow"
-#define AppVersion "3.3.0"
+#define AppVersion "3.4.0"
 #define AppPublisher "Eyad Jamal"
 #define AppExe "DropFlow.exe"
-#define AppSource "..\..\dist330\DropFlow"
+#define AppSource "..\..\dist340\DropFlow"
 
 [Setup]
 AppId={{A8F3D61B-4D2A-4E7E-9A87-2E4F8C1B6D33}
@@ -17,7 +17,7 @@ DefaultDirName={localappdata}\DropFlow
 DefaultGroupName=DropFlow
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
-OutputBaseFilename=DropFlow-Setup-3.3.0
+OutputBaseFilename=DropFlow-Setup-3.4.0
 OutputDir=output-classic
 SetupIconFile=..\package\Assets\DropFlow.ico
 Compression=lzma2/normal
@@ -37,11 +37,11 @@ Source: "{#AppSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs 
 Source: "Uninstall-Classic.ps1"; DestDir: "{app}"; DestName: "Uninstall.ps1"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\DropFlow"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"
-Name: "{autodesktop}\DropFlow"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{group}\DropFlow"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; Parameters: "--workspace"
+Name: "{autodesktop}\DropFlow"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; Parameters: "--workspace"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#AppExe}"; Description: "Launch DropFlow"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExe}"; Parameters: "--workspace"; Description: "Launch DropFlow"; Flags: nowait postinstall skipifsilent
 
 [Registry]
 ; Windows 11 legacy/classic context menu. Modern primary-menu registration

@@ -22,7 +22,7 @@ spec.loader.exec_module(df)
 
 class CoreTests(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(df.APP_VERSION, "3.3.0")
+        self.assertEqual(df.APP_VERSION, "3.4.0")
 
     def test_action_usage_persists(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -31,6 +31,18 @@ class CoreTests(unittest.TestCase):
                 cfg["action_usage"] = {"act_compress_pdfs": 7}
                 df.save_config(cfg)
                 self.assertEqual(df.load_config()["action_usage"], {"act_compress_pdfs": 7})
+
+    def test_workspace_preferences_and_recent_paths_persist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(df, "CONFIG_PATH", Path(tmp) / "config.json"):
+                cfg = df.load_config()
+                cfg.update(remember_recent=False, workspace_seen=True,
+                           recent_activity=[{"action":"Export", "sources":["sample.pdf"], "outputs":["sample.png"]}])
+                df.save_config(cfg)
+                loaded = df.load_config()
+                self.assertFalse(loaded["remember_recent"])
+                self.assertTrue(loaded["workspace_seen"])
+                self.assertEqual(loaded["recent_activity"][0]["outputs"], ["sample.png"])
 
     def test_fmt_size(self):
         self.assertIn("KB", df.fmt_size(2048))

@@ -1,9 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
+import sys
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('dropflow.png', '.'), ('dropflow3.png', '.')]
 binaries = []
-hiddenimports = ['pystray._win32', 'pytesseract', 'arabic_reshaper', 'bidi.algorithm', 'win32com.client', 'media_converter', 'office_converter', 'i18n', 'appearance', 'app_update']
+hiddenimports = [ 'pytesseract', 'arabic_reshaper', 'bidi.algorithm', 'media_converter', 'office_converter', 'i18n', 'appearance', 'app_update']
+hiddenimports += ['pystray._win32', 'win32com.client'] if sys.platform == 'win32' else ['pystray._xorg', 'pystray._appindicator', 'pystray._gtk', 'pynput.keyboard._xorg']
+
 tmp_ret = collect_all('tkinterdnd2')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('imageio_ffmpeg')
@@ -51,7 +54,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['shell/package/Assets/DropFlow.ico'],
+    icon=['shell/package/Assets/DropFlow.ico'] if sys.platform == 'win32' else None,
 )
 coll = COLLECT(
     exe,

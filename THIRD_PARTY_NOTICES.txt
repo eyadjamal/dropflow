@@ -1,14 +1,16 @@
-DropFlow 3.3.0 — third-party components
+DropFlow 3.4.0 — third-party components
 
 DropFlow source is licensed under AGPL-3.0; see LICENSE.
 The app uses Python, Tcl/Tk, Pillow, PyMuPDF, pystray, tkinterdnd2,
 python-docx, python-pptx, openpyxl, reportlab, pytesseract,
 arabic-reshaper, python-bidi and imageio-ffmpeg, with their dependencies.
-PyInstaller bundles the Windows runtime and packages. Distribution must
+Linux X11 shortcuts optionally use pynput and its dependencies.
+PyInstaller bundles the platform runtime and packages. Distribution must
 retain the applicable component notices and license terms from those packages.
 Refer to the included package metadata and upstream projects for their full terms.
 
-FFmpeg video/audio functionality is unchanged; its
+HEIC/HEIF image support and the pillow-heif image-codec dependency have been
+removed from this build. FFmpeg video/audio functionality is unchanged; its
 codec set and licensing are separate from image-format support.
 
 External tools such as LibreOffice, Tesseract, 7-Zip/UnRAR and Microsoft Office

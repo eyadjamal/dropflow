@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 
 try:
     import winreg
@@ -29,8 +31,8 @@ THEME_LABELS = {
 
 THEMES = {
     "midnight": dict(
-        bg="#11131c", fg="#eef0f7", accent="#b5a0ff", accent_hi="#d2c4ff",
-        surface="#1b1e2b", hover="#30364a", subtle="#a1a9be",
+        bg="#15202c", fg="#f2f6fa", accent="#8bd5ee", accent_hi="#b5eafa",
+        surface="#203040", hover="#33495b", subtle="#b0bfce",
         green="#a6e3a1", red="#f38ba8"),
     "slate": dict(
         bg="#111827", fg="#e5e7eb", accent="#38bdf8", accent_hi="#7dd3fc",
@@ -92,6 +94,12 @@ def _reg_dword(root, path, name, default=0):
 def system_prefers_light() -> bool:
     try:
         if winreg is None:
+            if shutil.which("gsettings"):
+                result = subprocess.run(["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+                                        capture_output=True, text=True, timeout=1)
+                preference = result.stdout.strip().strip("'\"")
+                if preference in ("prefer-light", "prefer-dark"):
+                    return preference == "prefer-light"
             return False
         value = _reg_dword(
             winreg.HKEY_CURRENT_USER,

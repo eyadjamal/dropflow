@@ -1,7 +1,7 @@
-pystray
+﻿pystray
 tkinterdnd2
 Pillow>=11.1
-PyMuPDF
+PyMuPDF>=1.26,<2
 python-docx
 reportlab
 python-pptx
@@ -14,5 +14,6 @@ imageio-ffmpeg
 # pywin32
 # Optional: RAR extraction support
 # rarfile
+
 
 

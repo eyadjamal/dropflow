@@ -64,16 +64,23 @@ import sys
 import tempfile
 import threading
 import time
-import winreg
+if sys.platform == "win32":
+    import winreg
 import zipfile
 from collections import Counter
 from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Callable
-from action_menu import identity, sections, CATEGORIES
+from action_menu import identity, sections, CATEGORIES, search_actions
+from recent_activity import clean_history, remember
+from preview_loader import PreviewLoader
+from ui_interactions import bind_scroll
 from quality_presets import LABELS, VIDEO, values as preset_values
 from batch_jobs import ItemResult, execute as execute_batch, is_combined
+from platform_runtime import (IS_WINDOWS, IS_LINUX, config_directory, process_options,
+    terminate_process_tree, open_file, open_browser, desktop_exec, linux_autostart,
+    linux_filemanager_menu, LinuxInstanceLock, load_tray_module)
 from ui_theme import configure_widgets
 from output_policy import route_output
 from output_panel import OutputPanel
@@ -86,8 +93,8 @@ from tkinter import ttk
 # --------------------------------------------------------------------------- #
 #  Bootstrap: platform guard, win32 basics, console-free start
 # --------------------------------------------------------------------------- #
-if sys.platform != "win32":
-    raise SystemExit("DropFlow is a Windows-only application.")
+if not (IS_WINDOWS or IS_LINUX):
+    raise SystemExit("DropFlow supports Windows and Linux.")
 
 if sys.version_info < (3, 10):
     raise SystemExit("DropFlow needs Python 3.10 or newer.")
@@ -98,18 +105,21 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
-CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-DETACHED_PROCESS = 0x00000008
-
-_user32 = ctypes.WinDLL("user32", use_last_error=True)
-_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-try:
-    _shcore = ctypes.WinDLL("shcore", use_last_error=True)
-except Exception:
-    _shcore = None
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if IS_WINDOWS else 0
+DETACHED_PROCESS = 0x00000008 if IS_WINDOWS else 0
+_user32 = _kernel32 = _shcore = None
+if IS_WINDOWS:
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    try:
+        _shcore = ctypes.WinDLL("shcore", use_last_error=True)
+    except OSError:
+        pass
 
 
 def _set_dpi_awareness() -> None:
+    if not IS_WINDOWS:
+        return
     try:  # per-monitor v2 on Windows 10+
         _user32.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
         _user32.SetProcessDpiAwarenessContext.restype = wintypes.BOOL
@@ -130,6 +140,9 @@ _set_dpi_awareness()
 
 
 def _msgbox(text: str, title: str = "DropFlow", flags: int = 0x10) -> None:
+    if not IS_WINDOWS:
+        print(f"{title}: {text}", file=sys.stderr)
+        return
     try:
         _user32.MessageBoxW.argtypes = [wintypes.HWND, wintypes.LPCWSTR,
                                         wintypes.LPCWSTR, wintypes.UINT]
@@ -177,7 +190,7 @@ def _cli_paths() -> list[str]:
 
 
 def _send_to_existing(paths: list[str]) -> bool:
-    payload = json.dumps({"paths": paths, "action": "show"}).encode("utf-8")
+    payload = json.dumps({"paths": paths, "action": "workspace" if "--workspace" in sys.argv else "show"}).encode("utf-8")
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline:
         try:
@@ -195,6 +208,14 @@ def _send_to_existing(paths: list[str]) -> bool:
 
 
 def _ensure_single_instance(paths: list[str] | None = None) -> None:
+    if IS_LINUX:
+        global _LINUX_LOCK
+        _LINUX_LOCK = LinuxInstanceLock(DATA_DIR / "instance.lock")
+        if not _LINUX_LOCK.acquire():
+            if not _send_to_existing(list(paths or [])):
+                _msgbox("DropFlow is already running; open its desktop window.")
+            raise SystemExit(0)
+        return
     global _MUTEX
     try:
         _kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
@@ -214,6 +235,8 @@ def _ensure_single_instance(paths: list[str] | None = None) -> None:
 
 
 def _relaunch_without_console() -> None:
+    if not IS_WINDOWS:
+        return
     """If started with python.exe, hand off to pythonw.exe and leave no console."""
     if getattr(sys, "frozen", False):
         return
@@ -247,7 +270,9 @@ def _relaunch_without_console() -> None:
     raise SystemExit(0)
 
 
-import pystray  # noqa: E402
+pystray = None
+if IS_WINDOWS:
+    import pystray  # noqa: E402
 from PIL import Image, ImageDraw, ImageOps  # noqa: E402
 from tkinterdnd2 import DND_FILES, TkinterDnD  # noqa: E402
 
@@ -298,7 +323,7 @@ except Exception:  # optional module; bundled normally
 #  Constants, theme, config, logging
 # --------------------------------------------------------------------------- #
 APP_NAME = "DropFlow"
-APP_VERSION = "3.3.0"
+APP_VERSION = "3.4.0"
 SUFFIX = "_dropflow"
 DEFAULT_HOTKEY = "ctrl+shift+d"
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif"}
@@ -348,7 +373,8 @@ def apply_appearance(setting: str = "midnight", accent: str = "",
     THEME_NAME = actual
     THEME_TOKENS = tokens
     ACCENT_CUSTOM = appearance.normalize_hex(accent, "") if appearance and accent else ""
-    REDUCED_MOTION = bool(reduce_motion)
+    from windows_backdrop import system_effects
+    REDUCED_MOTION = bool(reduce_motion) or not system_effects()[1]
     WINDOW_ALPHA = float(tokens.get("alpha", 1.0))
     BG = tokens["bg"]
     FG = tokens["fg"]
@@ -392,7 +418,7 @@ def mix_hex(start: str, end: str, amount: float) -> str:
         return end
 
 
-DATA_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / APP_NAME
+DATA_DIR = config_directory()
 CONFIG_PATH = DATA_DIR / "config.json"
 INSTANCE_PATH = DATA_DIR / "instance.json"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -434,7 +460,7 @@ def load_config() -> dict:
            "language": "en", "remember_position": True, "window_x": None,
            "window_y": None, "check_updates": True, "last_update_check": 0,
            "explorer_menu": False, "theme": "midnight", "accent": "",
-           "reduce_motion": False, "favorite_actions": [], "action_usage": {}, "saved_presets": [], "output_defaults": {}}
+           "reduce_motion": False, "favorite_actions": [], "action_usage": {}, "saved_presets": [], "output_defaults": {}, "recent_activity": [], "remember_recent": True, "workspace_seen": False}
     try:
         data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         if isinstance(data, dict):
@@ -479,6 +505,9 @@ def load_config() -> dict:
             if isinstance(usage, dict):
                 cfg["action_usage"] = {key: value for key, value in usage.items()
                                        if isinstance(key, str) and type(value) is int and value >= 0}
+            cfg["recent_activity"] = clean_history(data.get("recent_activity", []))
+            cfg["remember_recent"] = bool(data.get("remember_recent", True))
+            cfg["workspace_seen"] = bool(data.get("workspace_seen", False))
             favorites = data.get("favorite_actions")
             if isinstance(favorites, list):
                 cfg["favorite_actions"] = [str(x) for x in favorites if isinstance(x, str)]
@@ -530,7 +559,15 @@ def pretty_hotkey(hk: str) -> str:
     return " + ".join(parts)
 
 
+def launch_arguments():
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    return [sys.executable, str(Path(__file__).resolve())]
+
+
 def launch_command() -> str:
+    if IS_LINUX:
+        return desktop_exec(launch_arguments())
     if getattr(sys, "frozen", False):
         return f'"{sys.executable}"'
     exe = Path(sys.executable)
@@ -552,6 +589,9 @@ def app_dir() -> Path:
 
 
 def set_autostart(enabled: bool) -> None:
+    if IS_LINUX:
+        linux_autostart(enabled, launch_arguments())
+        return
     import winreg
     with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
         if enabled:
@@ -564,10 +604,15 @@ def set_autostart(enabled: bool) -> None:
 
 
 def explorer_command() -> str:
+    if IS_LINUX:
+        return desktop_exec([*launch_arguments(), "--send"]) + " %F"
     return launch_command() + ' --send "%1"'
 
 
 def set_explorer_menu(enabled: bool) -> None:
+    if IS_LINUX:
+        linux_filemanager_menu(enabled, launch_arguments())
+        return
     """Add/remove 'Send to DropFlow' for files and folders."""
     roots = (
         r"Software\Classes\*\shell\DropFlow",
@@ -604,6 +649,12 @@ def set_explorer_menu(enabled: bool) -> None:
 #  Win32 window helpers
 # --------------------------------------------------------------------------- #
 def force_foreground(target: tk.Misc | int, alt_trick: bool = True) -> None:
+    if not IS_WINDOWS:
+        if not isinstance(target, int):
+            target.deiconify()
+            target.lift()
+            target.focus_set()
+        return
     """Bring a Tk window to the front and give it keyboard focus.
 
     Windows blocks SetForegroundWindow from background processes.  A quick Alt
@@ -646,6 +697,8 @@ def force_foreground(target: tk.Misc | int, alt_trick: bool = True) -> None:
 
 
 def dark_titlebar(win: tk.Misc) -> None:
+    if not IS_WINDOWS:
+        return
     try:
         win.update_idletasks()
         hwnd = _user32.GetAncestor(win.winfo_id(), 2) or win.winfo_id()
@@ -662,6 +715,8 @@ def dark_titlebar(win: tk.Misc) -> None:
 
 
 def round_window(win: tk.Misc) -> None:
+    if not IS_WINDOWS:
+        return
     """Windows 11 rounded corners plus a native shadow request."""
     try:
         win.update_idletasks()
@@ -699,6 +754,8 @@ class _WindowCompositionAttributeData(ctypes.Structure):
 
 
 def _set_acrylic(hwnd, enabled: bool, tint=(21, 19, 33), alpha=200) -> bool:
+    if not IS_WINDOWS:
+        return False
     """Enable Windows 10/11 acrylic blur behind a Tk top-level."""
     try:
         user32 = ctypes.windll.user32
@@ -728,6 +785,8 @@ class _Margins(ctypes.Structure):
 
 
 def _enable_win11_backdrop(win: tk.Misc) -> bool:
+    if not IS_WINDOWS:
+        return False
     """DWM acrylic backdrop, dark titlebar, rounded corners and frame extension."""
     try:
         win.update_idletasks()
@@ -751,24 +810,14 @@ def _enable_win11_backdrop(win: tk.Misc) -> bool:
 
 
 def apply_window_glass(win: tk.Misc) -> float:
+    if not IS_WINDOWS:
+        return 1.0
     """Apply acrylic tint/alpha to a window and return its target alpha."""
-    glass = THEME_SETTING in ("glass", "windows_glass", "win11_glass") or THEME_NAME in ("glass", "windows_glass", "win11_glass")
-    try:
-        win.update_idletasks()
-        hwnd = _user32.GetAncestor(win.winfo_id(), 2) or win.winfo_id()
-        if glass:
-            if THEME_SETTING == "win11_glass":
-                _enable_win11_backdrop(win)
-            _set_acrylic(hwnd, True, THEME_TOKENS.get("glass_tint", (21, 19, 33)),
-                         int(WINDOW_ALPHA * 255))
-            alpha = WINDOW_ALPHA
-        else:
-            _set_acrylic(hwnd, False)
-            alpha = 1.0
-        win.attributes("-alpha", alpha)
-        return alpha
-    except Exception:
-        return WINDOW_ALPHA if glass else 1.0
+    from windows_backdrop import attach
+    enabled = THEME_SETTING in ("system", "midnight", "glass", "windows_glass", "win11_glass")
+    alpha = 0.86 if attach(win, enabled) else 1.0
+    win.attributes("-alpha", alpha)
+    return alpha
 
 
 # --------------------------------------------------------------------------- #
@@ -791,6 +840,11 @@ class _MONITORINFO(ctypes.Structure):
 
 
 def virtual_screen_rect() -> tuple[int, int, int, int]:
+    if not IS_WINDOWS:
+        root = tk._default_root
+        if root is not None:
+            return 0, 0, root.winfo_screenwidth(), root.winfo_screenheight()
+        return 0, 0, 1280, 720
     """Bounding box of every monitor, including negative positions."""
     try:
         x = int(_user32.GetSystemMetrics(SM_XVIRTUALSCREEN))
@@ -809,6 +863,9 @@ def virtual_screen_rect() -> tuple[int, int, int, int]:
 
 
 def monitor_dpi_at(x: int, y: int) -> int:
+    if not IS_WINDOWS:
+        root = tk._default_root
+        return round(root.winfo_fpixels("1i")) if root is not None else 96
     """Effective DPI of the monitor nearest the given screen point."""
     try:
         hmon = _user32.MonitorFromPoint(wintypes.POINT(int(x), int(y)),
@@ -830,6 +887,8 @@ def monitor_dpi_at(x: int, y: int) -> int:
 
 
 def primary_dpi() -> int:
+    if not IS_WINDOWS:
+        return monitor_dpi_at(0, 0)
     try:
         value = int(_user32.GetDpiForSystem())
         if value:
@@ -883,7 +942,7 @@ def choose_ui_font(root: tk.Misc) -> None:
     global FONT
     try:
         families = set(tkfont.families(root))
-        FONT = "Segoe UI Variable" if "Segoe UI Variable" in families else "Segoe UI"
+        FONT = next((name for name in ("Segoe UI Variable", "Segoe UI", "Noto Sans", "DejaVu Sans") if name in families), "TkDefaultFont")
     except Exception:
         FONT = "Segoe UI"
 
@@ -1017,31 +1076,23 @@ def clean_dropped_paths(tk_root: tk.Misc, raw: str) -> list[Path]:
 
 def reveal(path: Path) -> None:
     try:
-        p = Path(path)
-        if p.is_dir():
-            os.startfile(str(p))
-        else:
-            subprocess.Popen(["explorer", "/select,", str(p)],
-                             creationflags=CREATE_NO_WINDOW)
+        open_file(path, reveal=True)
     except Exception:
-        try:
-            os.startfile(str(Path(path).parent))
-        except Exception:
-            log.exception("Could not open folder")
+        log.exception("Could not open folder")
 
 
 def open_path(path: Path) -> None:
     try:
-        os.startfile(str(path))
+        open_file(path)
     except Exception:
-        log.exception("Could not open %s", path)
+        log.exception("Could not open file")
 
 
 def open_url(url: str) -> None:
     try:
-        os.startfile(str(url))
+        open_browser(url)
     except Exception:
-        log.exception("Could not open URL %s", url)
+        log.exception("Could not open browser")
 
 
 def _tail(text: str, limit: int = 600) -> str:
@@ -1102,18 +1153,7 @@ _PROGRESS_RE = re.compile(r"out_time_(?:us|ms)=(\d+)")
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
-    if proc.poll() is not None:
-        return
-    try:
-        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW,
-                       timeout=8)
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
+    terminate_process_tree(proc)
 
 
 class JobContext:
@@ -1182,7 +1222,7 @@ class JobContext:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
-            creationflags=CREATE_NO_WINDOW)
+            **process_options())
         out_lines: list[str] = []
         err_lines: list[str] = []
         last_pct = [-1]
@@ -1259,7 +1299,7 @@ def _run_hidden(cmd: list[str], timeout: float = 20) -> subprocess.CompletedProc
     return subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                           errors="replace", timeout=timeout,
-                          creationflags=CREATE_NO_WINDOW)
+                          **process_options())
 
 
 def _find_tesseract() -> str | None:
@@ -4391,245 +4431,249 @@ def parse_hotkey(hotkey: str) -> tuple[int, int, str]:
     return mods, vk, ""
 
 
-WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, ctypes.c_uint,
-                             wintypes.WPARAM, wintypes.LPARAM)
+if IS_WINDOWS:
+    WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, ctypes.c_uint,
+                                 wintypes.WPARAM, wintypes.LPARAM)
 
 
-class WNDCLASSW(ctypes.Structure):
-    _fields_ = [
-        ("style", ctypes.c_uint),
-        ("lpfnWndProc", WNDPROC),
-        ("cbClsExtra", ctypes.c_int),
-        ("cbWndExtra", ctypes.c_int),
-        ("hInstance", wintypes.HINSTANCE),
-        ("hIcon", wintypes.HANDLE),
-        ("hCursor", wintypes.HANDLE),
-        ("hbrBackground", wintypes.HANDLE),
-        ("lpszMenuName", wintypes.LPCWSTR),
-        ("lpszClassName", wintypes.LPCWSTR),
-    ]
+    class WNDCLASSW(ctypes.Structure):
+        _fields_ = [
+            ("style", ctypes.c_uint),
+            ("lpfnWndProc", WNDPROC),
+            ("cbClsExtra", ctypes.c_int),
+            ("cbWndExtra", ctypes.c_int),
+            ("hInstance", wintypes.HINSTANCE),
+            ("hIcon", wintypes.HANDLE),
+            ("hCursor", wintypes.HANDLE),
+            ("hbrBackground", wintypes.HANDLE),
+            ("lpszMenuName", wintypes.LPCWSTR),
+            ("lpszClassName", wintypes.LPCWSTR),
+        ]
 
 
-class HotkeyManager:
-    """Owns a hidden message-only window and one system-wide hotkey."""
+    class HotkeyManager:
+        """Owns a hidden message-only window and one system-wide hotkey."""
 
-    HOTKEY_ID = 0xD0F1
+        HOTKEY_ID = 0xD0F1
 
-    def __init__(self, callback: Callable[[], None]):
-        self._callback = callback
-        self._thread: threading.Thread | None = None
-        self._hwnd = None
-        self._ready = threading.Event()
-        self._done = threading.Event()
-        self._lock = threading.Lock()
-        self._cmd: tuple | None = None
-        self._result: tuple[bool, str] = (False, "")
-        self._current: str | None = None
-        self._wndproc_ref = None
+        def __init__(self, callback: Callable[[], None]):
+            self._callback = callback
+            self._thread: threading.Thread | None = None
+            self._hwnd = None
+            self._ready = threading.Event()
+            self._done = threading.Event()
+            self._lock = threading.Lock()
+            self._cmd: tuple | None = None
+            self._result: tuple[bool, str] = (False, "")
+            self._current: str | None = None
+            self._wndproc_ref = None
 
-    def start(self) -> None:
-        if self._thread and self._thread.is_alive():
-            return
-        self._thread = threading.Thread(target=self._run, name="DropFlowHotkey", daemon=True)
-        self._thread.start()
-        if not self._ready.wait(5):
-            log.error("Hotkey thread did not start in time")
+        def start(self) -> None:
+            if self._thread and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(target=self._run, name="DropFlowHotkey", daemon=True)
+            self._thread.start()
+            if not self._ready.wait(5):
+                log.error("Hotkey thread did not start in time")
 
-    def register(self, hotkey: str) -> tuple[bool, str]:
-        return self._post(("register", hotkey))
+        def register(self, hotkey: str) -> tuple[bool, str]:
+            return self._post(("register", hotkey))
 
-    def unregister(self) -> tuple[bool, str]:
-        return self._post(("unregister",))
+        def unregister(self) -> tuple[bool, str]:
+            return self._post(("unregister",))
 
-    def stop(self) -> None:
-        if self._thread and self._thread.is_alive():
-            if self._hwnd:
-                self._post(("stop",))
+        def stop(self) -> None:
+            if self._thread and self._thread.is_alive():
+                if self._hwnd:
+                    self._post(("stop",))
+                try:
+                    self._thread.join(2)
+                except Exception:
+                    pass
+
+        def _post(self, cmd: tuple) -> tuple[bool, str]:
+            if not self._hwnd:
+                return False, "The hotkey engine is not running."
+            with self._lock:
+                self._cmd = cmd
+                self._done.clear()
+            if not _user32.PostMessageW(self._hwnd, WM_APP, 0, 0):
+                return False, "Could not reach the hotkey engine."
+            if not self._done.wait(3):
+                return False, "The hotkey engine did not respond."
+            with self._lock:
+                return self._result
+
+        def _run(self) -> None:
             try:
-                self._thread.join(2)
+                self._create_window_and_loop()
+            except Exception:
+                log.exception("Hotkey thread failed")
+            finally:
+                self._ready.set()
+                self._hwnd = None
+
+        def _create_window_and_loop(self) -> None:
+            hinst = _kernel32.GetModuleHandleW(None)
+            class_name = f"DropFlowHotkey_{os.getpid()}"
+            wndproc = WNDPROC(self._wndproc)
+            self._wndproc_ref = wndproc  # keep alive
+
+            wc = WNDCLASSW()
+            wc.style = 0
+            wc.lpfnWndProc = wndproc
+            wc.hInstance = hinst
+            wc.lpszClassName = class_name
+            atom = _user32.RegisterClassW(ctypes.byref(wc))
+            if not atom:
+                err = ctypes.get_last_error()
+                if err != 1410:  # class already exists
+                    log.error("RegisterClassW failed: %s", err)
+            hwnd = _user32.CreateWindowExW(
+                0, class_name, "DropFlowHotkey", 0, 0, 0, 0, 0,
+                ctypes.c_void_p(-3),  # HWND_MESSAGE
+                None, hinst, None)
+            if not hwnd:
+                log.error("Could not create the hotkey message window")
+                return
+            self._hwnd = hwnd
+            self._ready.set()
+
+            msg = wintypes.MSG()
+            while True:
+                ret = _user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+                if ret <= 0:
+                    break
+                _user32.TranslateMessage(ctypes.byref(msg))
+                _user32.DispatchMessageW(ctypes.byref(msg))
+            try:
+                _user32.UnregisterHotKey(hwnd, self.HOTKEY_ID)
+                _user32.DestroyWindow(hwnd)
+                _user32.UnregisterClassW(class_name, hinst)
             except Exception:
                 pass
 
-    def _post(self, cmd: tuple) -> tuple[bool, str]:
-        if not self._hwnd:
-            return False, "The hotkey engine is not running."
-        with self._lock:
-            self._cmd = cmd
-            self._done.clear()
-        if not _user32.PostMessageW(self._hwnd, WM_APP, 0, 0):
-            return False, "Could not reach the hotkey engine."
-        if not self._done.wait(3):
-            return False, "The hotkey engine did not respond."
-        with self._lock:
-            return self._result
+        def _wndproc(self, hwnd, msg, wparam, lparam):
+            try:
+                if msg == WM_HOTKEY:
+                    if wparam == self.HOTKEY_ID:
+                        try:
+                            self._callback()
+                        except Exception:
+                            log.exception("Hotkey callback failed")
+                    return 0
+                if msg == WM_APP:
+                    with self._lock:
+                        cmd = self._cmd
+                    result = (False, "Unknown hotkey command.")
+                    try:
+                        if cmd and cmd[0] == "register":
+                            result = self._register_now(cmd[1])
+                        elif cmd and cmd[0] == "unregister":
+                            result = self._unregister_now()
+                        elif cmd and cmd[0] == "stop":
+                            result = self._unregister_now()
+                            _user32.PostQuitMessage(0)
+                    except Exception as exc:
+                        log.exception("Hotkey command failed")
+                        result = (False, str(exc))
+                    with self._lock:
+                        self._result = result
+                        self._done.set()
+                    return 0
+                if msg == 0x0010:  # WM_CLOSE
+                    _user32.PostQuitMessage(0)
+                    return 0
+            except Exception:
+                log.exception("Hotkey window procedure failed")
+            return _user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
-    def _run(self) -> None:
+        def _register_now(self, hotkey: str) -> tuple[bool, str]:
+            self._unregister_now()
+            mods, vk, err = parse_hotkey(hotkey)
+            if err:
+                return False, err
+            if not _user32.RegisterHotKey(self._hwnd, self.HOTKEY_ID,
+                                          mods | MOD_NOREPEAT, vk):
+                code = ctypes.get_last_error()
+                return False, _HOTKEY_ERRORS.get(code, f"Windows refused it (error {code}).")
+            self._current = hotkey
+            return True, ""
+
+        def _unregister_now(self) -> tuple[bool, str]:
+            if self._hwnd:
+                _user32.UnregisterHotKey(self._hwnd, self.HOTKEY_ID)
+            self._current = None
+            return True, ""
+
+
+    # Prototypes used by the helpers above.  Setting restypes matters on 64-bit
+    # Windows: without them ctypes truncates window handles to 32 bits.
+    _user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+    _user32.GetSystemMetrics.restype = ctypes.c_int
+    _user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+    _user32.MonitorFromPoint.restype = wintypes.HANDLE
+    _user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_MONITORINFO)]
+    _user32.GetMonitorInfoW.restype = wintypes.BOOL
+    _user32.GetDpiForSystem.argtypes = []
+    _user32.GetDpiForSystem.restype = wintypes.UINT
+    if _shcore is not None:
         try:
-            self._create_window_and_loop()
-        except Exception:
-            log.exception("Hotkey thread failed")
-        finally:
-            self._ready.set()
-            self._hwnd = None
-
-    def _create_window_and_loop(self) -> None:
-        hinst = _kernel32.GetModuleHandleW(None)
-        class_name = f"DropFlowHotkey_{os.getpid()}"
-        wndproc = WNDPROC(self._wndproc)
-        self._wndproc_ref = wndproc  # keep alive
-
-        wc = WNDCLASSW()
-        wc.style = 0
-        wc.lpfnWndProc = wndproc
-        wc.hInstance = hinst
-        wc.lpszClassName = class_name
-        atom = _user32.RegisterClassW(ctypes.byref(wc))
-        if not atom:
-            err = ctypes.get_last_error()
-            if err != 1410:  # class already exists
-                log.error("RegisterClassW failed: %s", err)
-        hwnd = _user32.CreateWindowExW(
-            0, class_name, "DropFlowHotkey", 0, 0, 0, 0, 0,
-            ctypes.c_void_p(-3),  # HWND_MESSAGE
-            None, hinst, None)
-        if not hwnd:
-            log.error("Could not create the hotkey message window")
-            return
-        self._hwnd = hwnd
-        self._ready.set()
-
-        msg = wintypes.MSG()
-        while True:
-            ret = _user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
-            if ret <= 0:
-                break
-            _user32.TranslateMessage(ctypes.byref(msg))
-            _user32.DispatchMessageW(ctypes.byref(msg))
-        try:
-            _user32.UnregisterHotKey(hwnd, self.HOTKEY_ID)
-            _user32.DestroyWindow(hwnd)
-            _user32.UnregisterClassW(class_name, hinst)
+            _shcore.GetDpiForMonitor.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                                 ctypes.POINTER(wintypes.UINT),
+                                                 ctypes.POINTER(wintypes.UINT)]
+            _shcore.GetDpiForMonitor.restype = ctypes.c_long
         except Exception:
             pass
+    _user32.GetAncestor.argtypes = [wintypes.HWND, ctypes.c_uint]
+    _user32.GetAncestor.restype = wintypes.HWND
+    _user32.GetForegroundWindow.restype = wintypes.HWND
+    _user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    _user32.SetForegroundWindow.restype = wintypes.BOOL
+    _user32.BringWindowToTop.argtypes = [wintypes.HWND]
+    _user32.BringWindowToTop.restype = wintypes.BOOL
+    _user32.SetFocus.argtypes = [wintypes.HWND]
+    _user32.SetFocus.restype = wintypes.HWND
+    _user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    _user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    _user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+    _user32.AttachThreadInput.restype = wintypes.BOOL
+    _user32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_size_t]
+    _user32.PostMessageW.argtypes = [wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM]
+    _user32.PostMessageW.restype = wintypes.BOOL
+    _user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
+    _user32.RegisterHotKey.restype = wintypes.BOOL
+    _user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
+    _user32.UnregisterHotKey.restype = wintypes.BOOL
+    _user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]
+    _user32.RegisterClassW.restype = ctypes.c_ushort
+    _user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
+    _user32.UnregisterClassW.restype = wintypes.BOOL
+    _user32.CreateWindowExW.argtypes = [
+        wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        wintypes.HWND, wintypes.HANDLE, wintypes.HINSTANCE, ctypes.c_void_p]
+    _user32.CreateWindowExW.restype = wintypes.HWND
+    _user32.DestroyWindow.argtypes = [wintypes.HWND]
+    _user32.DestroyWindow.restype = wintypes.BOOL
+    _user32.DefWindowProcW.argtypes = [wintypes.HWND, ctypes.c_uint,
+                                       wintypes.WPARAM, wintypes.LPARAM]
+    _user32.DefWindowProcW.restype = ctypes.c_ssize_t
+    _user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND,
+                                    wintypes.UINT, wintypes.UINT]
+    _user32.GetMessageW.restype = wintypes.BOOL
+    _user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+    _user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+    _user32.DispatchMessageW.restype = ctypes.c_ssize_t
+    _user32.PostQuitMessage.argtypes = [ctypes.c_int]
+    _user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+    _user32.GetAsyncKeyState.restype = ctypes.c_short
+    _kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+    _kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    _kernel32.GetModuleHandleW.restype = wintypes.HINSTANCE
 
-    def _wndproc(self, hwnd, msg, wparam, lparam):
-        try:
-            if msg == WM_HOTKEY:
-                if wparam == self.HOTKEY_ID:
-                    try:
-                        self._callback()
-                    except Exception:
-                        log.exception("Hotkey callback failed")
-                return 0
-            if msg == WM_APP:
-                with self._lock:
-                    cmd = self._cmd
-                result = (False, "Unknown hotkey command.")
-                try:
-                    if cmd and cmd[0] == "register":
-                        result = self._register_now(cmd[1])
-                    elif cmd and cmd[0] == "unregister":
-                        result = self._unregister_now()
-                    elif cmd and cmd[0] == "stop":
-                        result = self._unregister_now()
-                        _user32.PostQuitMessage(0)
-                except Exception as exc:
-                    log.exception("Hotkey command failed")
-                    result = (False, str(exc))
-                with self._lock:
-                    self._result = result
-                    self._done.set()
-                return 0
-            if msg == 0x0010:  # WM_CLOSE
-                _user32.PostQuitMessage(0)
-                return 0
-        except Exception:
-            log.exception("Hotkey window procedure failed")
-        return _user32.DefWindowProcW(hwnd, msg, wparam, lparam)
-
-    def _register_now(self, hotkey: str) -> tuple[bool, str]:
-        self._unregister_now()
-        mods, vk, err = parse_hotkey(hotkey)
-        if err:
-            return False, err
-        if not _user32.RegisterHotKey(self._hwnd, self.HOTKEY_ID,
-                                      mods | MOD_NOREPEAT, vk):
-            code = ctypes.get_last_error()
-            return False, _HOTKEY_ERRORS.get(code, f"Windows refused it (error {code}).")
-        self._current = hotkey
-        return True, ""
-
-    def _unregister_now(self) -> tuple[bool, str]:
-        if self._hwnd:
-            _user32.UnregisterHotKey(self._hwnd, self.HOTKEY_ID)
-        self._current = None
-        return True, ""
-
-
-# Prototypes used by the helpers above.  Setting restypes matters on 64-bit
-# Windows: without them ctypes truncates window handles to 32 bits.
-_user32.GetSystemMetrics.argtypes = [ctypes.c_int]
-_user32.GetSystemMetrics.restype = ctypes.c_int
-_user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
-_user32.MonitorFromPoint.restype = wintypes.HANDLE
-_user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_MONITORINFO)]
-_user32.GetMonitorInfoW.restype = wintypes.BOOL
-_user32.GetDpiForSystem.argtypes = []
-_user32.GetDpiForSystem.restype = wintypes.UINT
-if _shcore is not None:
-    try:
-        _shcore.GetDpiForMonitor.argtypes = [wintypes.HANDLE, ctypes.c_int,
-                                             ctypes.POINTER(wintypes.UINT),
-                                             ctypes.POINTER(wintypes.UINT)]
-        _shcore.GetDpiForMonitor.restype = ctypes.c_long
-    except Exception:
-        pass
-_user32.GetAncestor.argtypes = [wintypes.HWND, ctypes.c_uint]
-_user32.GetAncestor.restype = wintypes.HWND
-_user32.GetForegroundWindow.restype = wintypes.HWND
-_user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-_user32.SetForegroundWindow.restype = wintypes.BOOL
-_user32.BringWindowToTop.argtypes = [wintypes.HWND]
-_user32.BringWindowToTop.restype = wintypes.BOOL
-_user32.SetFocus.argtypes = [wintypes.HWND]
-_user32.SetFocus.restype = wintypes.HWND
-_user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-_user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-_user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
-_user32.AttachThreadInput.restype = wintypes.BOOL
-_user32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_size_t]
-_user32.PostMessageW.argtypes = [wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM]
-_user32.PostMessageW.restype = wintypes.BOOL
-_user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
-_user32.RegisterHotKey.restype = wintypes.BOOL
-_user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
-_user32.UnregisterHotKey.restype = wintypes.BOOL
-_user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]
-_user32.RegisterClassW.restype = ctypes.c_ushort
-_user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
-_user32.UnregisterClassW.restype = wintypes.BOOL
-_user32.CreateWindowExW.argtypes = [
-    wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
-    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-    wintypes.HWND, wintypes.HANDLE, wintypes.HINSTANCE, ctypes.c_void_p]
-_user32.CreateWindowExW.restype = wintypes.HWND
-_user32.DestroyWindow.argtypes = [wintypes.HWND]
-_user32.DestroyWindow.restype = wintypes.BOOL
-_user32.DefWindowProcW.argtypes = [wintypes.HWND, ctypes.c_uint,
-                                   wintypes.WPARAM, wintypes.LPARAM]
-_user32.DefWindowProcW.restype = ctypes.c_ssize_t
-_user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND,
-                                wintypes.UINT, wintypes.UINT]
-_user32.GetMessageW.restype = wintypes.BOOL
-_user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
-_user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
-_user32.DispatchMessageW.restype = ctypes.c_ssize_t
-_user32.PostQuitMessage.argtypes = [ctypes.c_int]
-_user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
-_user32.GetAsyncKeyState.restype = ctypes.c_short
-_kernel32.GetCurrentThreadId.restype = wintypes.DWORD
-_kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
-_kernel32.GetModuleHandleW.restype = wintypes.HINSTANCE
+else:
+    from linux_hotkeys import HotkeyManager
 
 
 _MODIFIER_KEYSYMS = {
@@ -4720,7 +4764,7 @@ class DropWindow:
 
         t = self.top = tk.Toplevel(app.root)
         t.withdraw()
-        t.overrideredirect(True)
+        t.overrideredirect(IS_WINDOWS)
         t.configure(bg=ACCENT)  # 1px accent border
         t.attributes("-topmost", True)
         t.attributes("-alpha", 0.0)
@@ -4867,6 +4911,16 @@ class DropWindow:
         walk(self.body)
 
     def _clear(self):
+        self._preview_generation = getattr(self, "_preview_generation", 0) + 1
+        for name in ("_preview_tick", "_search_job"):
+            pending = getattr(self, name, None)
+            if pending:
+                try:
+                    self.top.after_cancel(pending)
+                except tk.TclError:
+                    pass
+                setattr(self, name, None)
+        self.top.unbind("<Control-f>")
         self._cancel_timer()
         self._cancel_work_timer()
         if self.progress_bar is not None:
@@ -4977,10 +5031,23 @@ class DropWindow:
             cur = 1.0
         self._fade(cur, 0.0, 0.2, then=self._destroy)
 
+    def _stop_previews(self):
+        if hasattr(self, "_previews"):
+            self._previews.close()
+        for name in ("_preview_tick", "_search_job"):
+            pending = getattr(self, name, None)
+            if pending:
+                try:
+                    self.top.after_cancel(pending)
+                except tk.TclError:
+                    pass
+                setattr(self, name, None)
+
     def _destroy(self):
         if not self.alive:
             return
         self._remember_position()
+        self._stop_previews()
         self.alive = False
         self._close_password_dialog()
         if self._job is not None:
@@ -4993,6 +5060,7 @@ class DropWindow:
             self.app.win = None
 
     def shutdown(self):
+        self._stop_previews()
         organizer = getattr(self, "_organizer", None)
         if organizer is not None and organizer.winfo_exists():
             organizer.dispose()
@@ -5233,27 +5301,29 @@ class DropWindow:
                  font=(FONT, 9), anchor="e" if rtl else "w").pack(fill="x", padx=pad, pady=(px(4), px(7)))
 
         self._thumb_refs = []
+        self._preview_labels = {}
         strip = tk.Frame(self.body, bg=BG)
         strip.pack(fill="x", padx=pad, pady=(px(6), px(2)))
         for p in paths[:2]:
             chip = tk.Frame(strip, bg=SURFACE)
             chip.pack(side="right" if rtl else "left", padx=(px(5) if rtl else 0, 0 if rtl else px(5)))
-            thumb = self._thumbnail(p)
-            if thumb is not None:
-                self._thumb_refs.append(thumb)
-                tk.Label(chip, image=thumb, bg=SURFACE, bd=0).pack(
-                    side="right" if rtl else "left", padx=px(2), pady=px(2))
-            else:
-                glyph, color = self._file_glyph(p)
-                tk.Label(chip, text=glyph, fg=color, bg=SURFACE,
-                         font=(FONT, 9, "bold"), width=4).pack(
-                    side="right" if rtl else "left", padx=px(3), pady=px(2))
+            glyph, color = self._file_glyph(p)
+            placeholder = tk.Canvas(chip, bg=SURFACE, width=px(44), height=px(44), highlightthickness=0)
+            placeholder.create_text(px(22), px(22), text=glyph, fill=color, font=(FONT, 9, "bold"))
+            placeholder.pack(side="right" if rtl else "left", padx=px(3), pady=px(2))
+            if not hasattr(self, "_previews"):
+                self._previews = PreviewLoader()
+            self._preview_labels[p] = placeholder
+            self._previews.request(self._preview_generation, p)
             tk.Label(chip, text=p.name[:22], fg=FG, bg=SURFACE,
                      font=(FONT, 9)).pack(side="right" if rtl else "left", padx=(px(4) if rtl else 0, 0 if rtl else px(4)))
         if len(paths) > 2:
             tk.Label(strip, text=f"+{len(paths) - 2}", fg=SUBTLE, bg=BG,
                      font=(FONT, 8, "bold")).pack(side="right" if rtl else "left", padx=px(2))
 
+        self._poll_previews()
+        tk.Label(self.body, text=tr("Search actions · Ctrl+F"), fg=SUBTLE, bg=BG,
+                 font=(FONT, 9), anchor="e" if rtl else "w").pack(fill="x", padx=pad, pady=(px(9), 0))
         self._search_var = tk.StringVar()
         search_row = tk.Frame(self.body, bg=SURFACE)
         search_row.pack(fill="x", padx=pad, pady=(px(6), px(4)))
@@ -5267,7 +5337,20 @@ class DropWindow:
         self._search_entry.pack(side="right" if rtl else "left", fill="x", expand=True,
                                 ipady=px(4), pady=px(2))
         self._search_var.trace_add(
-            "write", lambda *a: self._render_actions())
+            "write", lambda *a: self._schedule_search())
+        ttk.Button(search_row, text=tr("Clear"), command=lambda: self._search_var.set(""), style="Ghost.TButton").pack(side="left" if rtl else "right")
+        self._search_entry.bind("<Return>", self._first_action)
+        self._search_entry.bind("<Down>", lambda e: self._focus_action(0))
+        def escape_search(event):
+            if self._search_var.get():
+                self._search_var.set("")
+                return "break"
+        self._search_entry.bind("<Escape>", escape_search)
+        def focus_search(event):
+            self._search_entry.focus_set()
+            self._search_entry.selection_range(0, "end")
+            return "break"
+        self.top.bind("<Control-f>", focus_search)
         self._actions_frame = tk.Frame(self.body, bg=BG)
         self._actions_frame.pack(fill="x", padx=pad)
         self._render_actions()
@@ -5296,55 +5379,84 @@ class DropWindow:
             return "P", "#f38ba8"
         return "\u25a1", SUBTLE
 
-    def _thumbnail(self, path: Path):
-        try:
-            from PIL import ImageTk
-            ext = path.suffix.lower()
-            if ext in IMG_EXTS:
-                im = Image.open(path)
-                try:
-                    im.thumbnail((44, 44))
-                    return ImageTk.PhotoImage(im.copy())
-                finally:
-                    im.close()
-            if ext == ".pdf" and path.stat().st_size < 80 * 1024 * 1024:
-                doc = fitz.open(path)
-                try:
-                    if len(doc):
-                        pix = doc[0].get_pixmap(matrix=fitz.Matrix(0.12, 0.12))
-                        im = Image.frombytes("RGB", (pix.width, pix.height),
-                                            pix.samples)
-                        im.thumbnail((44, 44))
-                        return ImageTk.PhotoImage(im)
-                finally:
-                    doc.close()
-        except Exception:
-            pass
-        return None
+    def _poll_previews(self):
+        self._preview_tick = None
+        if not self.alive or self.state != "menu" or not hasattr(self, "_previews"):
+            return
+        from PIL import ImageTk
+        while True:
+            try:
+                token, path, image = self._previews.results.get_nowait()
+            except queue.Empty:
+                break
+            label = self._preview_labels.get(path)
+            if token == self._preview_generation and image is not None and label is not None and label.winfo_exists():
+                photo = ImageTk.PhotoImage(image, master=self.top)
+                self._thumb_refs.append(photo)
+                label.delete("all")
+                label.create_image(px(22), px(22), image=photo)
+        self._preview_tick = self.top.after(70, self._poll_previews)
+
+    def _schedule_search(self):
+        if getattr(self, "_search_job", None):
+            self.top.after_cancel(self._search_job)
+        self._search_job = self.top.after(100, self._render_actions)
+
+    def _focus_action(self, index):
+        if self._action_buttons:
+            self._action_buttons[index % len(self._action_buttons)].focus_set()
+        return "break"
+
+    def _first_action(self, event=None):
+        if self._search_job:
+            self.top.after_cancel(self._search_job)
+            self._render_actions()
+        if self._action_buttons:
+            self._action_buttons[0].invoke()
+        return "break"
 
     def _render_actions(self):
+        self._search_job = None
+        if not self.alive or self.state != "menu":
+            return
         frame = self._actions_frame
-        for child in frame.winfo_children():
-            child.destroy()
         query = self._search_var.get().strip().casefold()
         favorites = self.app.cfg.get("favorite_actions", [])
         counts = self.app.cfg.get("action_usage", {})
-        visible = [a for a in self.actions if query in tr(a.label).casefold()]
-        canvas = tk.Canvas(frame, bg=BG, highlightthickness=0, height=min(px(350), max(px(220), self.top.winfo_screenheight() - px(300))))
-        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-        content = tk.Frame(canvas, bg=BG)
-        window = canvas.create_window(0, 0, anchor="nw", window=content)
-        content.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window, width=e.width))
-        def wheel(event):
-            canvas.yview_scroll(-int(event.delta / 120), "units")
-        def bind_wheel(widget):
-            widget.bind("<MouseWheel>", wheel)
-            for child in widget.winfo_children():
-                bind_wheel(child)
+        visible = search_actions(self.actions, query, tr)
+        if not hasattr(self, "_actions_content") or not self._actions_content.winfo_exists():
+            canvas = self._actions_canvas = tk.Canvas(frame, bg=BG, highlightthickness=0, height=min(px(340), max(px(190), self.top.winfo_screenheight() - px(340))))
+            scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=scrollbar.set)
+            scrollbar.pack(side="right", fill="y")
+            canvas.pack(side="left", fill="both", expand=True)
+            content = self._actions_content = tk.Frame(canvas, bg=BG)
+            window = canvas.create_window(0, 0, anchor="nw", window=content)
+            content.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+            canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window, width=e.width))
+        canvas, content = self._actions_canvas, self._actions_content
+        position = canvas.yview()[0] if query == getattr(self, "_last_query", "") else 0
+        self._last_query = query
+        for child in content.winfo_children():
+            child.destroy()
+        self._action_buttons = []
+        def action_button(parent, label, command):
+            button = ttk.Button(parent, text=label, command=command, style="Action.TButton")
+            index = len(self._action_buttons)
+            self._action_buttons.append(button)
+            button.bind("<Return>", lambda e: (button.invoke(), "break")[1])
+            button.bind("<Down>", lambda e: self._focus_action(index + 1))
+            button.bind("<Up>", lambda e: self._focus_action(index - 1))
+            def reveal(event):
+                content.update_idletasks()
+                top = canvas.canvasy(0)
+                y = button.winfo_rooty() - content.winfo_rooty()
+                height = canvas.winfo_height()
+                target = y if y < top else y + button.winfo_height() - height if y + button.winfo_height() > top + height else None
+                if target is not None:
+                    canvas.yview_moveto(max(0, target) / max(1, content.winfo_height()))
+            button.bind("<FocusIn>", reveal)
+            return button
         available = {identity(a): a for a in self.actions}
         saved = [r for r in self.app.cfg.get("saved_presets", []) if r["action_id"] in available]
         if saved:
@@ -5358,7 +5470,7 @@ class DropWindow:
                         self.open_pdf_organizer(a, preset_id=r["id"])
                     else:
                         self.show_output_options(a, r["options"], r["id"])
-                ttk.Button(content, text="↗  " + preset["name"], command=load, style="Action.TButton").pack(fill="x", pady=2)
+                action_button(content, "↗  " + preset["name"], load).pack(fill="x", pady=2)
         expanded = getattr(self, "_expanded_categories", set())
         self._expanded_categories = expanded
         for title, actions in sections(visible, favorites, counts):
@@ -5383,11 +5495,13 @@ class DropWindow:
                     ttk.Button(row, text="★" if favorite else "☆", width=3, style="Favorite.TButton" if favorite else "Ghost.TButton",
                                command=lambda a=action: self._toggle_favorite(a)).pack(
                                    side="right" if is_rtl() else "left")
-                    ttk.Button(row, text=tr(action.label), command=lambda a=action: self.choose(a), style="Action.TButton").pack(fill="x", expand=True)
-        if not visible:
-            tk.Label(content, text=tr("No matching actions"), bg=BG, fg=SUBTLE).pack()
-        bind_wheel(content)
-        self._fit()
+                    action_button(row, tr(action.label), lambda a=action: self.choose(a)).pack(fill="x", expand=True)
+        if not self._action_buttons:
+            ttk.Label(content, text=tr("No matching actions"), style="Heading.TLabel").pack(pady=(20, 6))
+            ttk.Label(content, text=tr("Try PDF, shrink, merge, image or audio."), style="Muted.TLabel", wraplength=px(330)).pack(pady=(0, 20))
+        bind_scroll(content, canvas)
+        content.update_idletasks()
+        canvas.yview_moveto(position)
 
     def _toggle_favorite(self, action):
         favorites = list(self.app.cfg.get("favorite_actions", []))
@@ -5967,6 +6081,8 @@ class DropWindow:
     def _show_file_results(self):
         results_frame = ttk.Frame(self.body)
         results_frame.pack(fill="x", padx=px(16), pady=px(8))
+        self._batch_overview = tk.StringVar()
+        ttk.Label(results_frame, textvariable=self._batch_overview, style="Muted.TLabel").pack(fill="x", pady=(0, 6))
         self._result_tree = ttk.Treeview(results_frame, columns=("file", "status", "output"),
                                         show="headings", height=5)
         self._result_tree.heading("file", text=tr("File"))
@@ -5981,6 +6097,7 @@ class DropWindow:
         self._result_tree.pack(fill="both", expand=True)
         self._result_tree.tag_configure("Done", foreground=GREEN)
         self._result_tree.tag_configure("Failed", foreground=RED)
+        self._result_signature = None
         self._result_details = tk.Text(self.body, height=3, width=36, wrap="word",
                                        bg=SURFACE, fg=FG, relief="flat", font=(FONT, 9), padx=12, pady=10)
         self._result_details.pack(fill="x", padx=px(12))
@@ -6004,6 +6121,10 @@ class DropWindow:
         tree = getattr(self, "_result_tree", None)
         if tree is None or not tree.winfo_exists():
             return
+        done = sum(i.status in ("Done", "Unchanged") for i in self._batch_items)
+        failed = sum(i.status == "Failed" for i in self._batch_items)
+        queued = sum(i.status == "Queued" for i in self._batch_items)
+        self._batch_overview.set(f"{tr('Done')}: {done}/{len(self._batch_items)}   ·   {tr('Failed')}: {failed}   ·   {tr('Queued')}: {queued}")
         for index, item in enumerate(self._batch_items):
             values = (item.source.name, tr(item.status), str(item.outputs[0]) if item.outputs else item.error)
             if tree.exists(str(index)):
@@ -6021,6 +6142,10 @@ class DropWindow:
         item = self._batch_items[int(selected[0])]
         text = str(item.source) + "\n" + (item.error or "\n".join(map(str, item.outputs))
                                             or item.preview or tr(item.status))
+        signature = (selected[0], text, tuple(map(str, item.outputs)))
+        if signature == getattr(self, "_result_signature", None):
+            return
+        self._result_signature = signature
         self._result_details.configure(state="normal")
         self._result_details.delete("1.0", "end")
         self._result_details.insert("1.0", text)
@@ -6048,11 +6173,19 @@ class DropWindow:
     def _batch_finished(self):
         self.busy = False
         self._job = None
+        if self.app.cfg.get("remember_recent", True):
+            self.app.cfg["recent_activity"] = remember(self.app.cfg.get("recent_activity", []), self._batch_action.label, self._batch_items)
+            save_config(self.app.cfg)
+            workspace = getattr(self.app, "workspace", None)
+            if workspace is not None and workspace.winfo_exists():
+                workspace.refresh()
         self._clear()
         self.state = "done"
         failed = sum(i.status == "Failed" for i in self._batch_items)
         done = sum(i.status in ("Done", "Unchanged") for i in self._batch_items)
-        ttk.Label(self.body, text=tr("Conversion complete"), style="Heading.TLabel").pack(anchor="w", padx=px(16), pady=(px(18), px(5)))
+        cancelled = any(i.status == "Cancelled" for i in self._batch_items)
+        title = "Some files need attention" if failed else "Job cancelled" if cancelled else "Conversion complete"
+        ttk.Label(self.body, text=tr(title), style="Heading.TLabel").pack(anchor="w", padx=px(16), pady=(px(18), px(5)))
         ttk.Label(self.body, text=f"{tr('Done')}: {done}  ·  {tr('Failed')}: {failed}",
                   style="Muted.TLabel").pack(anchor="w", padx=px(16), pady=(0, px(6)))
         self._show_file_results()
@@ -6069,6 +6202,8 @@ class DropWindow:
                 self.app.root.clipboard_clear()
                 self.app.root.clipboard_append("\n".join(texts))
             self._button(self.body, "Copy text", copy).pack(fill="x", padx=px(12))
+        ttk.Button(self.body, text=tr("Choose another action"), command=lambda: self.show_menu(self.paths)).pack(fill="x", padx=px(16), pady=(px(8), 0))
+        ttk.Button(self.body, text=tr("Open workspace"), command=self.app.open_workspace, style="Ghost.TButton").pack(fill="x", padx=px(16), pady=px(5))
         ttk.Button(self.body, text=tr("Close"), command=self.close, style="Ghost.TButton").pack(fill="x", padx=px(16), pady=px(10))
         self._fit()
 
@@ -6135,7 +6270,7 @@ class PasswordDialog:
         self.alive = True
         t = self.top = tk.Toplevel(win.top)
         t.withdraw()
-        t.overrideredirect(True)
+        t.overrideredirect(IS_WINDOWS)
         t.configure(bg=ACCENT)
         t.attributes("-topmost", True)
         t.protocol("WM_DELETE_WINDOW", self.cancel)
@@ -6514,7 +6649,7 @@ class SettingsWindow:
                             wraplength=px(350), justify="left")
         self.err.grid(row=4, column=0, columnspan=2, sticky="w")
         self.auto = tk.BooleanVar(value=bool(app.cfg.get("autostart")))
-        tk.Checkbutton(f, text=tr("Start DropFlow with Windows"), variable=self.auto, fg=FG,
+        tk.Checkbutton(f, text=tr("Start DropFlow at login" if IS_LINUX else "Start DropFlow with Windows"), variable=self.auto, fg=FG,
                        bg=BG, selectcolor=HOVER, activebackground=BG,
                        activeforeground=FG, font=(FONT, 10), highlightthickness=0,
                        bd=0).grid(row=5, column=0, columnspan=2, sticky="w",
@@ -6574,7 +6709,7 @@ class SettingsWindow:
             row=18, column=0, columnspan=2, sticky="w")
         self.explorer_var = tk.BooleanVar(
             value=bool(self.app.cfg.get("explorer_menu", False)))
-        tk.Checkbutton(f, text=tr("Add 'Send to DropFlow' to the Explorer context menu"),
+        tk.Checkbutton(f, text=tr("Add file-manager actions (Nautilus / Dolphin)" if IS_LINUX else "Add 'Send to DropFlow' to the Explorer context menu"),
                        variable=self.explorer_var, fg=FG, bg=BG,
                        selectcolor=HOVER, activebackground=BG,
                        activeforeground=FG, font=(FONT, 10), wraplength=px(350),
@@ -6714,15 +6849,19 @@ class SettingsWindow:
         self.top.focus_force()
         self.top.bind("<KeyPress>", self._capture_key)
 
+    @staticmethod
+    def _linux_event_mods(event):
+        return [name for mask, name in ((4, "ctrl"), (8, "alt"), (1, "shift"), (64, "win")) if event.state & mask]
+
     def _capture_key(self, event):
         if not self.recording:
             return None
         keysym = event.keysym
         if keysym in _MODIFIER_KEYSYMS:
-            mods = _mods_down()
+            mods = _mods_down() if IS_WINDOWS else self._linux_event_mods(event)
             self.var.set(pretty_hotkey("+".join(mods)) if mods else "Press your shortcut\u2026")
             return "break"
-        mods = _mods_down()
+        mods = _mods_down() if IS_WINDOWS else self._linux_event_mods(event)
         token = _keysym_token(keysym, event)
         if not token:
             self.err.config(text="That key can't be used. Try a letter, number or F-key.",
@@ -6863,7 +7002,15 @@ class App:
         self._ipc_stop = threading.Event()
         self._ipc_thread: threading.Thread | None = None
 
-        self.root = TkinterDnD.Tk()
+        try:
+            self.root = TkinterDnD.Tk()
+        except (tk.TclError, RuntimeError):
+            if IS_WINDOWS:
+                raise
+            if tk._default_root is not None:
+                tk._default_root.destroy()
+            self.root = tk.Tk()
+            log.warning("tkdnd unavailable; use the file chooser.")
         self.root.withdraw()
         self.root.title(APP_NAME)
         self.root.report_callback_exception = lambda *a: log.error("Tk callback error",
@@ -6873,8 +7020,17 @@ class App:
 
         configure_ttk(self.root)
 
-        self.icon = pystray.Icon(APP_NAME, make_tray_image(), APP_NAME,
-                                 self._tray_menu())
+        self.icon = None
+        try:
+            global pystray
+            if pystray is None:
+                pystray = load_tray_module()
+            self.icon = pystray.Icon(APP_NAME, make_tray_image(), APP_NAME, self._tray_menu())
+        except Exception:
+            if IS_WINDOWS:
+                raise
+            log.warning("System tray unavailable; the desktop window remains available.", exc_info=True)
+
 
         self.hotkey = HotkeyManager(lambda: self.q.put(("toggle",)))
         self.hotkey.start()
@@ -6939,14 +7095,14 @@ class App:
                        check_updates: bool = True,
                        explorer_menu: bool = False) -> tuple[bool, str]:
         ok, err = self.hotkey.register(hotkey)
-        if not ok:
+        if not ok and IS_WINDOWS:
             restored, restore_err = self.hotkey.register(self.cfg["hotkey"])
             self.hotkey_ok = bool(restored)
             self.hotkey_error = "" if restored else restore_err
             return False, f"That shortcut can't be used:\n{err}"
         self.cfg["hotkey"] = hotkey
-        self.hotkey_ok = True
-        self.hotkey_error = ""
+        self.hotkey_ok = ok
+        self.hotkey_error = "" if ok else err
         if ocr_langs:
             self.cfg["ocr_langs"] = ocr_langs
         self.cfg["remember_position"] = bool(remember_position)
@@ -7086,6 +7242,7 @@ class App:
         if self.update_info is not None:
             update_label = f"{tr('Update available')} ({self.update_info.version})"
         items = [
+            pystray.MenuItem(tr("Open workspace"), lambda i, it: self.q.put(("workspace",))),
             pystray.MenuItem(tr("Open drop zone"),
                              lambda i, it: self.q.put(("toggle",)), default=True),
             pystray.MenuItem(tr("Settings"),
@@ -7110,6 +7267,8 @@ class App:
         return pystray.Menu(*items)
 
     def _refresh_tray(self):
+        if self.icon is None:
+            return
         try:
             self.icon.menu = self._tray_menu()
             update = getattr(self.icon, "update_menu", None)
@@ -7146,6 +7305,9 @@ class App:
             open_url(url)
 
     def _hello(self):
+        if IS_LINUX:
+            self._maybe_check_updates()
+            return
         if self.hotkey_error:
             self.notify("DropFlow is running in the tray, but the shortcut could not be "
                         f"registered: {self.hotkey_error} Open Settings to pick another.")
@@ -7173,6 +7335,8 @@ class App:
         kind = msg[0]
         if kind == "toggle":
             self._toggle()
+        elif kind == "workspace":
+            self.open_workspace()
         elif kind == "settings":
             self._open_settings()
         elif kind == "appearance":
@@ -7190,6 +7354,8 @@ class App:
             paths = data.get("paths") or []
             if paths:
                 self.show_paths(paths)
+            elif data.get("action") == "workspace":
+                self.open_workspace()
             else:
                 self._toggle()
         elif kind == "update_done":
@@ -7316,8 +7482,49 @@ class App:
         except Exception:
             pass
 
+    def open_workspace(self):
+        self.cfg["workspace_seen"] = True
+        save_config(self.cfg)
+        from desktop_workspace import open_workspace
+        opening = not self.root.winfo_viewable()
+        workspace = open_workspace(self, save_config, tr)
+        alpha = apply_window_glass(self.root)
+        from fluent_buttons import install_button_light
+        self.root.tk.setvar("::dropflow_no_light", int(THEME_NAME == "high_contrast"))
+        if IS_WINDOWS:
+            install_button_light(self.root)
+        if opening and not REDUCED_MOTION:
+            def reveal(frame=0):
+                self.root.attributes("-alpha", alpha * (0.80 + 0.20 * frame / 7))
+                if frame < 7 and self.root.winfo_viewable():
+                    self.root.after(16, reveal, frame + 1)
+            reveal()
+        return workspace
+
     def run(self):
-        self.icon.run_detached()
+        if self.icon is not None:
+            try:
+                if IS_LINUX:
+                    # Xorg's detached backend nests run(), leaving a second
+                    # setup thread blocked on shutdown. Own the tray thread.
+                    def run_linux_tray():
+                        try:
+                            self.icon.run()
+                        except Exception:
+                            log.warning("Tray unavailable; using the desktop window.", exc_info=True)
+                            self.icon = None
+                    threading.Thread(target=run_linux_tray, name="DropFlowTray", daemon=True).start()
+                else:
+                    self.icon.run_detached()
+            except Exception:
+                if IS_WINDOWS:
+                    raise
+                log.warning("Tray startup failed; using the desktop window.", exc_info=True)
+                self.icon = None
+        if IS_LINUX or "--workspace" in sys.argv or not self.cfg.get("workspace_seen", False):
+            self.open_workspace()
+            if "--minimized" in sys.argv:
+                self.root.after(100, self.root.iconify)
         self.root.mainloop()
 
 
@@ -7367,10 +7574,13 @@ def _selftest() -> int:
         for mod in ("pystray", "pymupdf", "reportlab", "docx", "pptx", "openpyxl",
                     "arabic_reshaper", "bidi", "pytesseract", "imageio_ffmpeg"):
             try:
-                importlib.import_module(mod)
+                load_tray_module() if mod == "pystray" else importlib.import_module(mod)
                 item(f"import {mod}", True)
             except Exception as exc:
-                item(f"import {mod}", False, repr(exc))
+                if mod == "pystray" and IS_LINUX:
+                    lines.append(f"INFO optional tray unavailable: {exc!r}; desktop window available")
+                else:
+                    item(f"import {mod}", False, repr(exc))
 
         jpg = tmp / "selftest.jpg"
         png = tmp / "selftest.png"
@@ -7405,7 +7615,20 @@ def _selftest() -> int:
             root.destroy()
             item("Tk + tkinterdnd2", True)
         except Exception as exc:
-            item("Tk + tkinterdnd2", False, repr(exc))
+            if IS_LINUX:
+                try:
+                    if tk._default_root is not None:
+                        tk._default_root.destroy()
+                    fallback = tk.Tk()
+                    fallback.withdraw()
+                    fallback.update()
+                    fallback.destroy()
+                    item("Tk file-chooser fallback", True)
+                    lines.append(f"INFO drag and drop unavailable: {exc!r}")
+                except Exception as fallback_error:
+                    item("Tk", False, repr(fallback_error))
+            else:
+                item("Tk + tkinterdnd2", False, repr(exc))
 
         ctx = JobContext(lambda _msg: None)
         try:

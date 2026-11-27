@@ -1,4 +1,4 @@
-$ErrorActionPreference = "SilentlyContinue"
+﻿$ErrorActionPreference = "SilentlyContinue"
 $target = Join-Path $env:LOCALAPPDATA "DropFlow"
 Get-Process DropFlow | Stop-Process -Force
 

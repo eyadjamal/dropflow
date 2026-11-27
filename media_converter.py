@@ -37,6 +37,7 @@ Async usage
 """
 from __future__ import annotations
 
+from platform_runtime import process_options, terminate_process_tree
 import logging
 import os
 import re
@@ -169,7 +170,7 @@ class MediaConverter:
                 [str(path), "-version"], stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding="utf-8", errors="replace", timeout=12,
-                creationflags=CREATE_NO_WINDOW)
+                **process_options())
             return res.returncode == 0
         except Exception:
             return False
@@ -242,7 +243,7 @@ class MediaConverter:
                     [self.ffmpeg, "-encoders"], stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, encoding="utf-8", errors="replace", timeout=15,
-                    creationflags=CREATE_NO_WINDOW)
+                    **process_options())
                 for line in (res.stdout or "").splitlines():
                     parts = line.split()
                     if len(parts) >= 2 and len(parts[0]) >= 3:
@@ -484,7 +485,7 @@ class MediaConverter:
                  "-of", "default=noprint_wrappers=1:nokey=1", str(src)],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, encoding="utf-8",
-                errors="replace", timeout=20, creationflags=CREATE_NO_WINDOW)
+                errors="replace", timeout=20, **process_options())
             value = (res.stdout or "").strip().splitlines()[0]
             return float(value)
         except Exception:
@@ -497,7 +498,7 @@ class MediaConverter:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8",
-            errors="replace", bufsize=1, creationflags=CREATE_NO_WINDOW)
+            errors="replace", bufsize=1, **process_options())
         out_lines: list[str] = []
         err_lines: list[str] = []
         last_pct = [-1]
@@ -552,18 +553,7 @@ class MediaConverter:
 
     @staticmethod
     def _kill_tree(proc: subprocess.Popen) -> None:
-        if proc.poll() is not None:
-            return
-        try:
-            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW,
-                           timeout=8)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+        terminate_process_tree(proc)
 
     @staticmethod
     def _tail(text: str, limit: int = 600) -> str:

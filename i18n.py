@@ -1,4 +1,4 @@
-"""Small localization layer for DropFlow (English/Arabic)."""
+﻿"""Small localization layer for DropFlow (English/Arabic)."""
 from __future__ import annotations
 
 import re
@@ -21,6 +21,44 @@ def is_rtl() -> bool:
 
 
 AR = {
+    "No recent jobs yet": "لا توجد مهام سابقة بعد",
+    "A job is running. Finish or cancel it before adding files.": "توجد مهمة قيد التنفيذ. أكملها أو ألغها قبل إضافة ملفات.",
+    'Your files. Ready for anything.': 'ملفاتك جاهزة لكل مهمة.',
+    'Convert, organize and find your latest outputs in one place.': 'حوّل ونظّم واعثر على أحدث النتائج في مكان واحد.',
+    'Drop files here': 'اسحب الملفات هنا',
+    'PDFs, images, documents, video and archives': 'ملفات PDF والصور والمستندات والفيديو والأرشيف',
+    'Quick drop zone': 'منطقة الإسقاط السريع',
+    'Clear recent': 'مسح السجل',
+    'Action': 'الإجراء',
+    'Result': 'النتيجة',
+    'When': 'الوقت',
+    'Use inputs again': 'استخدام المدخلات مجدداً',
+    'Open output folder': 'فتح مجلد النتائج',
+    'Remember recent activity locally': 'حفظ النشاط الأخير محلياً',
+    'Ctrl+O: choose files · Recent activity stores paths, not file contents.': 'Ctrl+O: اختيار ملفات · يُحفظ المسار فقط دون محتويات الملفات.',
+    'Select a recent job to reuse its inputs or open its output folder.': 'اختر مهمة سابقة لإعادة استخدام مدخلاتها أو فتح مجلد النتائج.',
+    'Your completed jobs will appear here. Start by choosing files above.': 'ستظهر مهامك هنا. ابدأ باختيار الملفات أعلاه.',
+    'Some inputs are missing. Choose files again.': 'بعض المدخلات مفقودة. اختر الملفات مجدداً.',
+    'Output unavailable. It may have been moved or deleted.': 'النتيجة غير متاحة. ربما نُقلت أو حُذفت.',
+    'Remove recent activity? Your files will stay unchanged.': 'هل تريد مسح النشاط الأخير؟ لن تتغير ملفاتك.',
+    'Open workspace': 'فتح مساحة العمل',
+    'Suggested': 'إجراءات مقترحة',
+    'Search actions · Ctrl+F': 'البحث عن إجراء · Ctrl+F',
+    'Clear': 'مسح',
+    'Try PDF, shrink, merge, image or audio.': 'جرّب PDF أو تصغير أو دمج أو صورة أو صوت.',
+    'Some files need attention': 'بعض الملفات تحتاج إلى المراجعة',
+    'Job cancelled': 'أُلغيت المهمة',
+    'Choose another action': 'اختيار إجراء آخر',
+
+    'Start DropFlow at login': 'تشغيل DropFlow عند تسجيل الدخول',
+    'Add file-manager actions (Nautilus / Dolphin)': 'إضافة إجراءات مدير الملفات (Nautilus / Dolphin)',
+    'Drop it. Convert it. Done.': 'اسحب. حوّل. انتهى.',
+    'Drop files here, or choose files to get started.': 'اسحب الملفات هنا أو اختر ملفات للبدء.',
+    'Choose files…': 'اختيار ملفات…',
+    'Choose folder…': 'اختيار مجلد…',
+    'Show drop zone': 'إظهار منطقة الإسقاط',
+    'Desktop shortcut command: dropflow --toggle': 'أمر اختصار سطح المكتب: dropflow --toggle',
+
     "HEIC/HEIF images are not supported.": "صور HEIC/HEIF غير مدعومة.",
     'READY TO CONVERT': 'جاهز للتحويل',
     'Choose where your files go.': 'اختر مكان حفظ ملفاتك.',

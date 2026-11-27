@@ -1,4 +1,4 @@
-"""Appearance token tests."""
+﻿"""Appearance token tests."""
 import sys
 import unittest
 from pathlib import Path

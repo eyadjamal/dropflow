@@ -1,5 +1,5 @@
 """Shared visual system: typography, semantic buttons and accessible palette."""
-from tkinter import ttk
+from tkinter import ttk, font as tkfont
 from appearance import contrast_ratio
 
 def primary_text(accent):
@@ -14,24 +14,27 @@ def configure_widgets(root, colors):
     muted = colors.get("subtle", fg)
     ink = primary_text(accent)
     scale = ui_scale(root)
-    style.configure(".", font=("Segoe UI", 10))
+    families = set(tkfont.families(root))
+    font = next((name for name in ("Segoe UI", "Noto Sans", "DejaVu Sans") if name in families), "TkDefaultFont")
+    style.configure(".", font=(font, 10))
     style.configure("TFrame", background=bg)
     style.configure("TLabel", background=bg, foreground=fg)
-    style.configure("Muted.TLabel", background=bg, foreground=muted, font=("Segoe UI", 9))
-    style.configure("Eyebrow.TLabel", background=bg, foreground=accent, font=("Segoe UI", 9, "bold"))
-    style.configure("Title.TLabel", background=bg, foreground=fg, font=("Segoe UI", 19, "bold"))
-    style.configure("Heading.TLabel", background=bg, foreground=fg, font=("Segoe UI", 12, "bold"))
+    style.configure("Muted.TLabel", background=bg, foreground=muted, font=(font, 9))
+    style.configure("Eyebrow.TLabel", background=bg, foreground=accent, font=(font, 9, "bold"))
+    style.configure("Title.TLabel", background=bg, foreground=fg, font=(font, 19, "bold"))
+    style.configure("Heading.TLabel", background=bg, foreground=fg, font=(font, 12, "bold"))
     style.configure("Card.TFrame", background=surface, bordercolor=hover, borderwidth=1, relief="solid")
+    style.configure("CardBody.TFrame", background=surface, borderwidth=0, relief="flat")
     style.configure("Card.TLabel", background=surface, foreground=fg)
-    style.configure("CardTitle.TLabel", background=surface, foreground=fg, font=("Segoe UI", 10, "bold"))
-    style.configure("CardMuted.TLabel", background=surface, foreground=muted, font=("Segoe UI", 9))
+    style.configure("CardTitle.TLabel", background=surface, foreground=fg, font=(font, 10, "bold"))
+    style.configure("CardMuted.TLabel", background=surface, foreground=muted, font=(font, 9))
     style.configure("Card.TEntry", fieldbackground=bg, foreground=fg, insertcolor=fg, padding=8)
     style.configure("TButton", background=surface, foreground=fg, bordercolor=hover,
                     lightcolor=surface, darkcolor=surface, borderwidth=1, relief="flat", padding=(12, 8))
     style.map("TButton", background=[("disabled", surface), ("active", hover)],
               foreground=[("disabled", muted), ("active", fg)], bordercolor=[("focus", accent)])
     style.configure("Primary.TButton", background=accent, foreground=ink,
-                    bordercolor=accent, lightcolor=accent, darkcolor=accent, font=("Segoe UI", 10, "bold"))
+                    bordercolor=accent, lightcolor=accent, darkcolor=accent, font=(font, 10, "bold"))
     style.map("Primary.TButton", background=[("disabled", hover), ("pressed", accent), ("active", accent)],
               foreground=[("disabled", muted), ("active", ink)], bordercolor=[("focus", fg)])
     style.configure("Ghost.TButton", background=bg, foreground=muted, borderwidth=0, padding=(10, 7))
@@ -47,8 +50,10 @@ def configure_widgets(root, colors):
     style.map("Card.TEntry", bordercolor=[("focus", accent)])
     style.configure("TPanedwindow", background=bg)
     style.configure("Treeview", background=surface, fieldbackground=surface, foreground=fg,
-                    bordercolor=hover, rowheight=round(32 * scale), borderwidth=0)
+                    bordercolor=hover, lightcolor=surface, darkcolor=surface, relief="flat",
+                    rowheight=round(32 * scale), borderwidth=0)
     style.map("Treeview", background=[("selected", hover)], foreground=[("selected", accent)])
-    style.configure("Treeview.Heading", background=bg, foreground=muted, padding=(8, 8), font=("Segoe UI", 9, "bold"))
+    style.configure("Treeview.Heading", background=bg, foreground=muted, padding=(8, 8), font=(font, 9, "bold"),
+                    borderwidth=0, relief="flat", bordercolor=hover, lightcolor=bg, darkcolor=bg)
     style.configure("Vertical.TScrollbar", background=surface, troughcolor=bg, arrowcolor=muted,
                     bordercolor=bg, lightcolor=surface, darkcolor=surface, borderwidth=0, arrowsize=10)

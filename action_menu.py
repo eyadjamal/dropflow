@@ -1,6 +1,29 @@
 """Pure action metadata and menu ranking; no Tk dependencies."""
 CATEGORIES = ("Convert", "PDF Tools", "Extract", "Archive")
 
+ALIASES = {
+    "compress": "small smaller shrink reduce size optimize ضغط تصغير",
+    "merge": "combine join جمع دمج",
+    "organize": "reorder rearrange rotate sort ترتيب تدوير",
+    "extract": "unpack unzip export استخراج",
+    "ocr": "scan scanned recognize searchable مسح نص",
+    "jpg": "jpeg picture photo صورة",
+    "png": "picture photo صورة",
+    "zip": "archive package folder مجلد أرشيف",
+    "audio": "sound music mp3 صوت",
+}
+
+def search_actions(actions, query, translate=lambda text: text):
+    """Match intent words across both languages, labels and categories."""
+    tokens = query.casefold().split()
+    result = []
+    for action in actions:
+        text = " ".join((action.label, translate(action.label), category(action), identity(action))).casefold()
+        extra = " ".join(value for key, value in ALIASES.items() if key in text)
+        if all(token in text or token in extra for token in tokens):
+            result.append(action)
+    return result
+
 def identity(action):
     func = action.func
     name = getattr(func, "__name__", "action")
@@ -25,5 +48,6 @@ def sections(actions, favorites, counts):
     ranked = sorted(enumerate(rest), key=lambda pair: (-counts.get(identity(pair[1]), 0), pair[0]))
     common = [a for _, a in ranked[:3]]
     remaining = [a for a in rest if a not in common]
-    return [("Favorites", fav), ("Frequently used", common)] + [
+    title = "Frequently used" if any(counts.get(identity(a), 0) for a in rest) else "Suggested"
+    return [("Favorites", fav), (title, common)] + [
         (c, [a for a in remaining if category(a) == c]) for c in CATEGORIES]

@@ -1,4 +1,4 @@
-# DropFlow visual system (3.3)
+# DropFlow visual system (3.5)
 
 ## Palette
 Midnight: background #11131c, surface #1b1e2b, border/hover #30364a, primary text #eef0f7, secondary text #a1a9be, accent #b5a0ff.
@@ -23,3 +23,9 @@ The PDF workspace separates editing, page navigation and saving. Thumbnail outli
 
 ## Checks
 Contrast is covered by tests across all shipped palettes. Native Tk smoke checks cover dark/light, Arabic and 100–150% scaling. Screenshots use sample documents, not user documents.
+
+## Workspace
+
+A single bordered drop card leads into recent activity. Primary file selection uses the accent; folder selection, quick access, privacy and settings remain secondary. The recent table preserves selection when jobs finish. Empty and missing-file states explain the next action. Background preview slots keep a fixed size to avoid layout jumps.
+
+Search supports Ctrl+F, Down/Up, Enter and Escape-to-clear. Native Tab focus remains available. Dark/light surfaces share the same geometry; fonts fall back to Noto Sans or DejaVu Sans on Linux. Recent activity can be disabled or cleared without deleting files.

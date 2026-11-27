@@ -1,0 +1,2 @@
+# Optional automatic X11 global shortcut. Wayland uses a desktop-configured shortcut.
+pynput>=1.7

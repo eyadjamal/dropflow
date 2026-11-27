@@ -46,6 +46,7 @@ import html as html_module
 import importlib
 import importlib.util
 import json
+from platform_runtime import process_options, terminate_process_tree
 import logging
 import os
 import re
@@ -255,7 +256,7 @@ class OfficeConverter:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8",
-            errors="replace", creationflags=CREATE_NO_WINDOW)
+            errors="replace", **process_options())
         started = time.monotonic()
         try:
             while proc.poll() is None:
@@ -274,18 +275,7 @@ class OfficeConverter:
 
     @staticmethod
     def _kill_tree(proc: subprocess.Popen) -> None:
-        if proc.poll() is not None:
-            return
-        try:
-            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW,
-                           timeout=8)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+        terminate_process_tree(proc)
 
     @staticmethod
     def _tail(text: str, limit: int = 700) -> str:
@@ -664,7 +654,7 @@ class OfficeConverter:
 
         text = self._read_text(src)
         font_name = "Helvetica"
-        font_file = Path(r"C:\Windows\Fonts\arial.ttf")
+        font_file = Path(r"C:\Windows\Fonts\arial.ttf") if os.name == "nt" else Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
         if font_file.is_file():
             try:
                 pdfmetrics.registerFont(TTFont("DropFlowSans", str(font_file)))

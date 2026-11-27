@@ -1,21 +1,36 @@
 # DropFlow
 
-**Version 3.3.0** · Windows 10/11 x64 · Python 3.12
+**Version 3.4.0** · Windows 10/11 x64 and Linux x86_64 · Python 3.10+ (3.12 recommended)
 
 ### Drop it. Convert it. Done.
 
-A local Windows tray utility for PDF, Office, image, archive, video and audio tasks. Drop files, choose an action, review the destination, and convert. No account, uploads or telemetry.
-
-[![Download for Windows](https://img.shields.io/badge/Download_for_Windows-v3.3.0-5944d6?style=for-the-badge&logo=windows)](https://github.com/eyadjamal/dropflow/releases/download/v3.3.0/DropFlow-Setup-3.3.0.exe)
-
-[Download portable ZIP](https://github.com/eyadjamal/dropflow/releases/download/v3.3.0/DropFlow-3.3.0-Portable.zip)
+A local desktop utility for PDF, Office, image, archive, video and audio tasks. Drop files, choose an action, review the destination, and convert. No account, uploads or telemetry.
 
 [![Tests](https://github.com/eyadjamal/dropflow/actions/workflows/tests.yml/badge.svg)](https://github.com/eyadjamal/dropflow/actions/workflows/tests.yml)
-[Download source ZIP](https://github.com/eyadjamal/dropflow/archive/refs/heads/main.zip) · [Published Windows releases](https://github.com/eyadjamal/dropflow/releases)
+[Download source ZIP](https://github.com/eyadjamal/dropflow/archive/refs/heads/main.zip) · [Published releases](https://github.com/eyadjamal/dropflow/releases)
 
-The current source and Windows downloads are version **3.3.0**.
+This branch contains **3.4.0** source and build configuration. Existing release downloads retain the version in their release title; updating the branch does not replace older release assets.
 
-## What's new in 3.3.0
+## What's new in 3.4.0
+
+- **Shared workspace:** one home for Windows and Linux, with file/folder selection, the quick drop zone and recent jobs. Open it from the tray or launch with `--workspace`. It appears on first launch; Windows shortcuts open it directly.
+- **Recent activity:** the latest 15 jobs, reusable input selections and quick output-folder access. Activity stores paths and result counts locally, without document contents or conversion passwords. Disable recording or clear the list from the workspace.
+- **Smarter search:** intent words such as “shrink PDF” and “combine,” English/Arabic labels, a short input debounce, Ctrl+F, arrow navigation and Enter to review the first action. New users see Suggested actions until usage is available.
+- **Smoother previews:** bounded, cached thumbnails render on a background worker. Stale previews cannot replace a new selection and preview tasks stop when their window closes.
+- **Clearer results:** live completed/failed/queued counts, stable result details, meaningful failure/cancellation headings, and shortcuts to another action or the workspace.
+- **Appearance and controls:** shared dark/light cards, cleaner tables, empty states, fonts chosen for the platform and Linux mouse-wheel scrolling in action/output screens.
+
+## Cross-platform support (3.4.0)
+
+- **Linux support:** a desktop control window, file/folder selection, optional drag and drop and tray support.
+- **Desktop integration:** per-user installation, application launcher, autostart, and optional Nautilus/Dolphin actions.
+- **Portable runtime:** Linux process cancellation, output opening, fonts and XDG configuration paths; Windows integration retained.
+- **Shortcuts:** optional X11 global shortcut; on Wayland, configure your desktop shortcut to `dropflow --toggle`.
+- **Cross-platform checks:** Windows and Ubuntu CI, unit tests and native Tk conversion/retry/organizer smoke tests.
+
+See [Linux installation and compatibility](LINUX.md). Linux packaging targets x86_64; desktop tray and global shortcut availability depend on the desktop environment.
+
+## Features retained from 3.3.0
 
 - **Smarter menu:** applicable favorites and three frequently used actions first; other actions grouped under Convert, PDF Tools, Extract and Archive. Search reveals matching groups.
 - **Quality presets:** Small file, Balanced and Best quality, with advanced parameters available separately.
@@ -26,10 +41,17 @@ The current source and Windows downloads are version **3.3.0**.
 - **Refreshed appearance/UI:** refined Midnight and Light themes, readable typography, consistent cards and controls, clear primary actions, numbered page cards, rotation badges and keyboard-aware scrolling.
 - **English and Arabic:** translated controls and RTL form labels; display scaling checked at 100–150%.
 - **Maintainability:** separate modules for menu ranking, quality presets, jobs, presets, output policy, output review, PDF models, organizer UI and styling.
+- **HEIC/HEIF image support removed:** no conversion actions, codec imports or pillow-heif packaging dependency. Supported image conversion targets are PNG, JPG and WebP.
 
 ## Screenshots
 
 These screenshots use sample documents.
+
+### Workspace and recent activity
+![Workspace with recent jobs](screenshots/3.5.0/workspace-dark.png)
+
+### Workspace — light
+![Workspace light](screenshots/3.5.0/workspace-light.png)
 
 ### Action menu
 ![Action menu](screenshots/3.3.0/action-menu.png)
@@ -63,7 +85,18 @@ python -m pip install -r requirements.txt
 python DropFlow.pyw --console
 ```
 
-Use 64-bit Python 3.12 on Windows and keep the Python modules together. Configuration, presets and logs are stored in `%APPDATA%\DropFlow`.
+Use 64-bit Python 3.12 on Windows and keep the Python modules together. Configuration, presets, recent path references and logs are stored in `%APPDATA%\DropFlow`.
+
+## Linux installation
+
+Extract the Linux source package, then run as your normal desktop user:
+
+```bash
+sudo apt install python3-tk python3-venv libxcursor1 xdg-utils
+sh linux/install.sh
+```
+
+Open **DropFlow** from the applications menu. The installer creates an isolated Python environment and downloads its dependencies. See [LINUX.md](LINUX.md) for the portable executable, optional helpers and Wayland notes.
 
 ## Windows builds
 
@@ -89,11 +122,10 @@ python -m unittest discover -s tests -v
 python DropFlow.pyw --selftest --console
 ```
 
-See [DEVELOPMENT.md](DEVELOPMENT.md), [ARCHITECTURE.md](ARCHITECTURE.md), [DESIGN.md](DESIGN.md) and [CHANGELOG.md](CHANGELOG.md). Windows CI installs requirements, compiles the source and runs tests.
+See [DEVELOPMENT.md](DEVELOPMENT.md), [ARCHITECTURE.md](ARCHITECTURE.md), [DESIGN.md](DESIGN.md) and [CHANGELOG.md](CHANGELOG.md). CI runs unit tests and native Tk smoke checks on Windows and Ubuntu.
 
 ## Privacy and license
 
-Conversions run locally. The optional update checker contacts the GitHub releases API. No document upload, telemetry or account is required.
+Conversions run locally. The optional update checker contacts the GitHub releases API. No document upload, telemetry or account is required. Recent activity is stored locally in configuration and can be disabled or cleared. Clearing activity does not delete input or output files.
 
 Source is licensed under [AGPL-3.0](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.txt).
-

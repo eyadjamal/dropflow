@@ -23,6 +23,13 @@ spec.loader.exec_module(df)
 
 
 class IPCTests(unittest.TestCase):
+    def test_workspace_command_brings_up_workspace(self):
+        from types import SimpleNamespace
+        app = SimpleNamespace(open_workspace=mock.Mock(), _toggle=mock.Mock())
+        df.App._dispatch(app, ("incoming", {"action":"workspace", "paths":[]}))
+        app.open_workspace.assert_called_once()
+        app._toggle.assert_not_called()
+
     def test_send_to_existing(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp) / "instance.json"
@@ -60,7 +67,7 @@ class IPCTests(unittest.TestCase):
     def test_explorer_command(self):
         command = df.explorer_command()
         self.assertIn("--send", command)
-        self.assertIn("%1", command)
+        self.assertIn("%1" if df.IS_WINDOWS else "%F", command)
 
     def test_ipc_server(self):
         with tempfile.TemporaryDirectory() as tmp:

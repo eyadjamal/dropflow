@@ -1,8 +1,8 @@
 __pycache__/
 *.py[cod]
-build/
-dist/
-*.exe
-*.zip
-*.7z
-*.bak*
+.venv/
+build*/
+dist*/
+shell/installer/output*/
+*.log
+DropFlow-*-Linux-*.tar.gz
