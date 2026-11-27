@@ -41,7 +41,6 @@ See [Linux installation and compatibility](LINUX.md). Linux packaging targets x8
 - **Refreshed appearance/UI:** refined Midnight and Light themes, readable typography, consistent cards and controls, clear primary actions, numbered page cards, rotation badges and keyboard-aware scrolling.
 - **English and Arabic:** translated controls and RTL form labels; display scaling checked at 100–150%.
 - **Maintainability:** separate modules for menu ranking, quality presets, jobs, presets, output policy, output review, PDF models, organizer UI and styling.
-- **HEIC/HEIF image support removed:** no conversion actions, codec imports or pillow-heif packaging dependency. Supported image conversion targets are PNG, JPG and WebP.
 
 ## Screenshots
 
