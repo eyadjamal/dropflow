@@ -2,14 +2,14 @@
 
 **Version 3.4.0** · Windows 10/11 x64 and Linux x86_64 · Python 3.10+ (3.12 recommended)
 
-### Drop it. Convert it. Done.
+Drop files into the workspace to convert documents, organize PDFs, process images and media, or create archives. Files stay on your computer.
 
-A local desktop utility for PDF, Office, image, archive, video and audio tasks. Drop files, choose an action, review the destination, and convert. No account, uploads or telemetry.
+[![Download Windows](https://img.shields.io/badge/Download_Windows-Installer-176B97?style=for-the-badge)](https://github.com/eyadjamal/dropflow/releases/download/v3.4.0/DropFlow-Setup-3.4.0.exe)
+[![Download Linux](https://img.shields.io/badge/Download_Linux-x86__64-32745D?style=for-the-badge)](https://github.com/eyadjamal/dropflow/releases/download/v3.4.0/DropFlow-3.4.0-Linux-x86_64.tar.gz)
 
-[![Tests](https://github.com/eyadjamal/dropflow/actions/workflows/tests.yml/badge.svg)](https://github.com/eyadjamal/dropflow/actions/workflows/tests.yml)
-[Download source ZIP](https://github.com/eyadjamal/dropflow/archive/refs/heads/main.zip) · [Published releases](https://github.com/eyadjamal/dropflow/releases)
+[Portable Windows ZIP](https://github.com/eyadjamal/dropflow/releases/download/v3.4.0/DropFlow-3.4.0-Portable.zip) · [Source code](https://github.com/eyadjamal/dropflow/archive/refs/tags/v3.4.0.zip) · [Release notes](https://github.com/eyadjamal/dropflow/releases/tag/v3.4.0)
 
-This branch contains **3.4.0** source and build configuration. Existing release downloads retain the version in their release title; updating the branch does not replace older release assets.
+On Windows, run the installer or extract the entire portable ZIP. On Linux, extract the binary archive and run `./DropFlow/DropFlow --workspace` from its parent directory. The Linux build targets x86_64 graphical desktops with glibc 2.36 or newer and X11 or XWayland. See [Linux setup and optional conversion tools](LINUX.md).
 
 ## What's new in 3.4.0
 
@@ -20,7 +20,9 @@ This branch contains **3.4.0** source and build configuration. Existing release 
 - **Clearer results:** live completed/failed/queued counts, stable result details, meaningful failure/cancellation headings, and shortcuts to another action or the workspace.
 - **Appearance and controls:** shared dark/light cards, cleaner tables, empty states, fonts chosen for the platform and Linux mouse-wheel scrolling in action/output screens.
 
-## Cross-platform support (3.4.0)
+- **Windows appearance:** the workspace and quick drop zone can show live blurred content on supported Windows 11 desktops. The Midnight palette now uses blue accents. Workspace buttons follow the pointer with a soft highlight, and the workspace fades in when opened. Windows transparency and animation settings are respected.
+
+### Linux support
 
 - **Linux support:** a desktop control window, file/folder selection, optional drag and drop and tray support.
 - **Desktop integration:** per-user installation, application launcher, autostart, and optional Nautilus/Dolphin actions.
@@ -30,7 +32,7 @@ This branch contains **3.4.0** source and build configuration. Existing release 
 
 See [Linux installation and compatibility](LINUX.md). Linux packaging targets x86_64; desktop tray and global shortcut availability depend on the desktop environment.
 
-## Features retained from 3.3.0
+## Features
 
 - **Smarter menu:** applicable favorites and three frequently used actions first; other actions grouped under Convert, PDF Tools, Extract and Archive. Search reveals matching groups.
 - **Quality presets:** Small file, Balanced and Best quality, with advanced parameters available separately.
@@ -40,30 +42,17 @@ See [Linux installation and compatibility](LINUX.md). Linux packaging targets x8
 - **Visual PDF organizer:** drag thumbnails to reorder, rotate/delete pages, add PDFs, undo and preview. Saves a new document and preserves the originals.
 - **Refreshed appearance/UI:** refined Midnight and Light themes, readable typography, consistent cards and controls, clear primary actions, numbered page cards, rotation badges and keyboard-aware scrolling.
 - **English and Arabic:** translated controls and RTL form labels; display scaling checked at 100–150%.
-- **Maintainability:** separate modules for menu ranking, quality presets, jobs, presets, output policy, output review, PDF models, organizer UI and styling.
-- **HEIC/HEIF image support removed:** no conversion actions, codec imports or pillow-heif packaging dependency. Supported image conversion targets are PNG, JPG and WebP.
-
 ## Screenshots
 
-These screenshots use sample documents.
+The Windows 3.4.0 workspace with sample activity, followed by the action menu for a sample PDF.
 
-### Workspace and recent activity
-![Workspace with recent jobs](screenshots/3.5.0/workspace-dark.png)
+![DropFlow workspace with three sample jobs](screenshots/3.4.0/windows-workspace.png)
 
-### Workspace — light
-![Workspace light](screenshots/3.5.0/workspace-light.png)
+![PDF action menu with Organize PDF pages, Compress PDF and Split choices](screenshots/3.4.0/windows-actions.png)
 
-### Action menu
-![Action menu](screenshots/3.3.0/action-menu.png)
+The Linux workspace on Debian 12 with an empty job history.
 
-### Presets and output review
-![Output controls](screenshots/3.3.0/output-review.png)
-
-### PDF organizer — dark
-![PDF organizer dark](screenshots/3.3.0/pdf-organizer-dark.png)
-
-### PDF organizer — light
-![PDF organizer light](screenshots/3.3.0/pdf-organizer-light.png)
+![DropFlow workspace on Debian 12](screenshots/3.4.0/linux-workspace.png)
 
 ## Conversion tools
 
@@ -76,7 +65,7 @@ These screenshots use sample documents.
 | Video/audio | Media conversion, compression and audio extraction through FFmpeg |
 | ZIP/RAR, files/folders | ZIP creation and supported archive extraction, including password prompts |
 
-Image inputs: PNG, JPG/JPEG, WebP, BMP, TIFF and GIF. HEIC/HEIF image files are unsupported. Archiving arbitrary files is separate from image conversion. Optional helpers affect operation availability and layout fidelity.
+Image inputs: PNG, JPG/JPEG, WebP, BMP, TIFF and GIF. Archiving arbitrary files is separate from image conversion. Optional helpers affect operation availability and layout fidelity.
 
 ## Run from source
 
@@ -87,7 +76,7 @@ python DropFlow.pyw --console
 
 Use 64-bit Python 3.12 on Windows and keep the Python modules together. Configuration, presets, recent path references and logs are stored in `%APPDATA%\DropFlow`.
 
-## Linux installation
+## Linux source installation
 
 Extract the Linux source package, then run as your normal desktop user:
 
@@ -109,7 +98,7 @@ The public setup installs per user and provides the classic Explorer **Send to D
 - **LibreOffice:** preferred Office-to-PDF/slide rendering and legacy Office files. Microsoft Office COM is a fallback with installed Office and pywin32.
 - **Tesseract:** OCR; install the English/Arabic language data you need.
 - **7-Zip or UnRAR:** RAR and supported encrypted archive cases.
-- **FFmpeg:** bundled through imageio-ffmpeg. Its video/audio codecs are independent of the removed image support.
+- **FFmpeg:** bundled through imageio-ffmpeg.
 
 ## PDF organizer
 
